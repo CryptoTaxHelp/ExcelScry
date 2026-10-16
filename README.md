@@ -109,7 +109,7 @@ signed or it fails — never quietly unsigned.
 | Artifact | Path |
 |---|---|
 | Portable executable | `dist/ExcelScry-portable/ExcelScry.exe` |
-| NSIS installer | `dist/ExcelScry-0.1.1-setup.exe` |
+| NSIS installer | `dist/ExcelScry-0.2.0-setup.exe` |
 | Raw build products | `src-tauri/target/release/ExcelScry.exe`, `src-tauri/target/release/bundle/nsis/` |
 
 The **portable** build is a single self-contained `.exe` — the front end is
