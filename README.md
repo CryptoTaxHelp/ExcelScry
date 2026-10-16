@@ -569,6 +569,7 @@ copy cannot silently mislabel an installer.
 ```bash
 python scripts/release.py 0.2.0 --dry-run    # say what it would do
 python scripts/release.py 0.2.0              # do it
+python scripts/release.py --resume           # finish a run that stopped part-way
 ```
 
 That is the whole sequence in one command: bump every copy, move the
@@ -589,9 +590,26 @@ Before pushing it prints the notes the release page will carry, read from the
 commit it just tagged, so they can be read before they are published rather than
 after. `--dry-run` stops before anything is written.
 
+**A release that fails part-way is finished, not repeated.** The version is
+written before anything is committed, so a run that dies in between — a commit
+that does not happen, a tag push the remote refuses, a machine that goes away
+mid-push — leaves a repository that no longer reads as ready to release, because
+the version is not ahead of itself any more, while nothing it did is wrong.
+`--resume` takes that state and finishes it: it commits what is still
+uncommitted, writes any copy of the version a killed run left behind, makes the
+tag again if there is none, and pushes whatever the remote does not have, saying
+which of those each step is first. Steps that are already done are left alone,
+so it is safe to run again: on a release that is already out it reports that
+there is nothing to finish and stops. It refuses to guess — a tag of that
+version held elsewhere as a different tag object, a change the release did not
+make, or a `HEAD` that is no release commit are refused rather than resolved —
+and every failure that leaves a half-made release names this command in its own
+message, so the way out is in the output rather than in this file.
+
 Every push runs the same sequence in a throwaway repository:
 [`scripts/test_release.py`](scripts/test_release.py) is what makes the refusals
-above and the release itself checked behaviour rather than a description of one.
+above, the release itself, and the states a failed run leaves behind — finished
+by `--resume`, or refused — checked behaviour rather than a description of one.
 
 The three pieces are still usable on their own:
 

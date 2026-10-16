@@ -83,9 +83,31 @@ those entries into a version section and tags the commit that holds it.
   leaves alone, and a full release end to end: the four copies of the version,
   the moved changelog section, the files the release commit carries, the
   annotated tag, both pushes, and the report a rejected tag push leaves behind.
+  The states a failed run leaves are in there too, each made by failing the real
+  thing rather than by writing the state out: a commit the repository refuses, a
+  tag push the remote refuses, a bump killed between its own writes — and for
+  each of them, the `--resume` that finishes it, what it does not do again, and
+  what it refuses.
   The scripts are copied rather than reimplemented, so the code under test is
   the code in the checkout, and the run fails if this repository's `HEAD` or
   `git status` moved while it was going.
+- **A release that fails part-way is finished, not repeated.** `release.py`
+  writes the version before it commits anything, so a run that dies after that
+  leaves a repository that reads as "not ahead of the current version" while
+  everything it wrote is still wanted — a commit that did not happen, a tag the
+  remote refused, a machine that went away mid-push. `python scripts/release.py
+  --resume` finishes that run where it stopped: it commits what is still
+  uncommitted, writes any copy of the version a killed run left behind, makes the
+  tag again if there is none, and pushes whatever the remote does not have, both
+  the branch and the tag — saying which of those each step is before it does it.
+  Steps that are already done are left alone, so running it again is safe, and a
+  release that is already out is answered with "nothing to finish" rather than
+  pushed at again. The failures that leave this state — the commit that did not
+  happen and the push that did not land — now name this command in their own
+  message instead of printing a `git push` to be run by hand. It refuses to
+  guess: a tag of that version held elsewhere as a different tag object, a change
+  the release did not make, and a `HEAD` that is no release commit are refused
+  rather than resolved.
 
 ### Changed
 
