@@ -9,6 +9,8 @@ those entries into a version section and tags the commit that holds it.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-16
+
 ### Added
 
 - **Self-updating from the project's GitHub releases.** ExcelScry asks the
