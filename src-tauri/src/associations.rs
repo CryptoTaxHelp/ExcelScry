@@ -47,7 +47,11 @@ pub const EXTENSIONS: &[(&str, &str, &str)] = &[
     (".xlsx", "ExcelScry.xlsx", "ExcelScry Worksheet"),
     // Macro-enabled workbooks are readable because nothing here executes VBA;
     // see the note in the module docs.
-    (".xlsm", "ExcelScry.xlsm", "ExcelScry Macro-Enabled Workbook"),
+    (
+        ".xlsm",
+        "ExcelScry.xlsm",
+        "ExcelScry Macro-Enabled Workbook",
+    ),
     (".xls", "ExcelScry.xls", "ExcelScry 97-2003 Worksheet"),
 ];
 
@@ -84,7 +88,11 @@ pub fn register_ops(exe: &str) -> Vec<RegOp> {
 
     for (ext, progid, description) in EXTENSIONS {
         // The ProgID: what Explorer opens when this app owns the extension.
-        ops.push(op_set(format!("Software\\Classes\\{progid}"), "", description));
+        ops.push(op_set(
+            format!("Software\\Classes\\{progid}"),
+            "",
+            description,
+        ));
         ops.push(op_set(
             format!("Software\\Classes\\{progid}"),
             "FriendlyTypeName",
@@ -115,7 +123,8 @@ pub fn register_ops(exe: &str) -> Vec<RegOp> {
 
         // The context-menu verb. This lives under SystemFileAssociations so it
         // is not tied to whichever ProgID currently owns the extension.
-        let verb_key = format!("Software\\Classes\\SystemFileAssociations\\{ext}\\shell\\{VERB_KEY}");
+        let verb_key =
+            format!("Software\\Classes\\SystemFileAssociations\\{ext}\\shell\\{VERB_KEY}");
         ops.push(op_set(verb_key.clone(), "", VERB_LABEL));
         ops.push(op_set(verb_key.clone(), "Icon", &icon));
         ops.push(op_set(format!("{verb_key}\\command"), "", &command));
@@ -325,11 +334,11 @@ mod imp {
         let had_value = backup.get_value::<u32, _>("HadValue").unwrap_or(0) != 0;
         let previous: String = backup.get_value("Value").unwrap_or_default();
 
-        if let Ok(classes) = root.open_subkey_with_flags(
-            "Software\\Classes",
-            KEY_READ | winreg::enums::KEY_WRITE,
-        ) {
-            if let Ok(ext_key) = classes.open_subkey_with_flags(ext, winreg::enums::KEY_ALL_ACCESS) {
+        if let Ok(classes) =
+            root.open_subkey_with_flags("Software\\Classes", KEY_READ | winreg::enums::KEY_WRITE)
+        {
+            if let Ok(ext_key) = classes.open_subkey_with_flags(ext, winreg::enums::KEY_ALL_ACCESS)
+            {
                 let ours = EXTENSIONS
                     .iter()
                     .find(|(e, _, _)| *e == ext)
@@ -390,10 +399,9 @@ mod imp {
                 continue;
             }
             // Best effort: honoured where no hash-protected UserChoice exists.
-            if let Ok(classes) = root.open_subkey_with_flags(
-                "Software\\Classes",
-                KEY_READ | winreg::enums::KEY_WRITE,
-            ) {
+            if let Ok(classes) = root
+                .open_subkey_with_flags("Software\\Classes", KEY_READ | winreg::enums::KEY_WRITE)
+            {
                 if let Ok((ext_key, _)) = classes.create_subkey(ext) {
                     if let Err(e) = ext_key.set_value("", progid) {
                         notes.push(format!("could not set default for {ext}: {e}"));
@@ -560,18 +568,21 @@ mod tests {
                 "Software\\Classes\\SystemFileAssociations\\{ext}\\shell\\{VERB_KEY}\\command"
             );
             assert!(
-                ops.iter().any(|op| matches!(op, RegOp::SetString { key, name, .. }
+                ops.iter()
+                    .any(|op| matches!(op, RegOp::SetString { key, name, .. }
                     if *key == verb_cmd && name.is_empty())),
                 "missing context-menu command for {ext}"
             );
             assert!(
-                ops.iter().any(|op| matches!(op, RegOp::SetNone { key, name }
+                ops.iter()
+                    .any(|op| matches!(op, RegOp::SetNone { key, name }
                     if *key == format!("Software\\Classes\\{ext}\\OpenWithProgids")
                         && name == progid)),
                 "missing OpenWithProgids entry for {ext}"
             );
             assert!(
-                ops.iter().any(|op| matches!(op, RegOp::SetString { key, name, .. }
+                ops.iter()
+                    .any(|op| matches!(op, RegOp::SetString { key, name, .. }
                     if *key == format!("{CAPABILITIES_PATH}\\FileAssociations") && name == ext)),
                 "missing capability for {ext}"
             );
@@ -614,7 +625,8 @@ mod tests {
         for (ext, progid, _) in EXTENSIONS {
             let key = format!("Software\\Classes\\{ext}\\OpenWithProgids");
             assert!(
-                undo.iter().any(|op| matches!(op, RegOp::DeleteValue { key: k, name }
+                undo.iter()
+                    .any(|op| matches!(op, RegOp::DeleteValue { key: k, name }
                     if *k == key && name == progid)),
                 "OpenWithProgids entry for {ext} is not removed"
             );
@@ -634,7 +646,10 @@ mod tests {
                 RegOp::DeleteValue { key, .. } => &created == key,
                 _ => false,
             });
-            assert!(covered, "registry key not cleaned up on uninstall: {created}");
+            assert!(
+                covered,
+                "registry key not cleaned up on uninstall: {created}"
+            );
         }
     }
 
@@ -643,12 +658,14 @@ mod tests {
         let ops = register_ops("C:\\Apps\\ExcelScry.exe");
         let verb = "Software\\Classes\\SystemFileAssociations\\.xlsm\\shell\\ScryExcelFile";
         assert!(
-            ops.iter().any(|op| matches!(op, RegOp::SetString { key, name, value }
+            ops.iter()
+                .any(|op| matches!(op, RegOp::SetString { key, name, value }
                 if key == verb && name.is_empty() && value == "Scry Excel File")),
             ".xlsm does not get the context-menu verb"
         );
         assert!(
-            ops.iter().any(|op| matches!(op, RegOp::SetString { key, name, .. }
+            ops.iter()
+                .any(|op| matches!(op, RegOp::SetString { key, name, .. }
                 if *key == format!("{verb}\\command") && name.is_empty())),
             ".xlsm verb has no command"
         );
@@ -658,7 +675,8 @@ mod tests {
             ".xlsm is not advertised as a handler"
         );
         assert!(
-            ops.iter().any(|op| matches!(op, RegOp::SetString { key, name, .. }
+            ops.iter()
+                .any(|op| matches!(op, RegOp::SetString { key, name, .. }
                 if *key == format!("{CAPABILITIES_PATH}\\FileAssociations") && name == ".xlsm")),
             ".xlsm has no Default Apps capability"
         );

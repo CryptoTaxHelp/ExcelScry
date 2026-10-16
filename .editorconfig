@@ -1,0 +1,61 @@
+# Editor policy. Keep this in step with .gitattributes: that file decides what
+# git does with line endings, this one decides what an editor writes before git
+# ever sees it. Without it an editor that prefers CRLF can reintroduce exactly
+# the mismatch .gitattributes exists to prevent.
+#
+# The values below were taken from what the files already do rather than from
+# preference: no file in this repository contains a tab, every one ends with a
+# newline, and none carries trailing whitespace.
+
+root = true
+
+[*]
+charset = utf-8
+# git stores the canonical form with LF. .gitattributes says `* text=auto`,
+# which checks files out with the platform's native endings, so writing LF here
+# costs nothing and gives scripts/*.sh the ending their shebang needs.
+end_of_line = lf
+indent_style = space
+indent_size = 4
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+# Front end: plain HTML, CSS and JS with no build step and no formatter to
+# appeal to.
+[*.{js,css,html}]
+indent_size = 2
+
+# Configuration and data.
+[*.{json,toml,yml,yaml}]
+indent_size = 2
+
+# The NSIS hooks sit next to Tauri's own generated installer script, which is
+# 2-space indented. (.ps1 keeps the default of 4.)
+[*.nsh]
+indent_size = 2
+
+# Two trailing spaces are a hard line break in Markdown, so trimming them could
+# change how a page renders. Nothing here uses one today; this stops an editor
+# from removing one later.
+[*.md]
+indent_size = 2
+trim_trailing_whitespace = false
+
+# Cargo.lock is cargo's own output and nests with a single space. It should not
+# be hand-edited, but if it is opened, an editor must not "fix" it.
+[Cargo.lock]
+indent_size = 1
+
+# Windows-native scripts and installer headers: .gitattributes pins these to
+# CRLF, so writing CRLF here makes the working tree match what git checks out.
+[*.{ps1,nsh,bat,cmd}]
+end_of_line = crlf
+
+# Binary assets: .gitattributes marks these `binary` so git never normalises or
+# diffs them. Keep editors away from them too -- "trimming trailing whitespace"
+# inside a PNG or an .xlsx would corrupt it.
+[*.{png,ico,exe,dll,xlsx,xlsm}]
+charset = unset
+end_of_line = unset
+insert_final_newline = false
+trim_trailing_whitespace = false

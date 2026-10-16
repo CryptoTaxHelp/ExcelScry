@@ -116,9 +116,14 @@
 
       <footer class="statusbar">
         <span class="status-file" id="status-file">No file open</span>
+        <button class="trust-badge" id="trust-badge" type="button" hidden>
+          <span class="trust-dot" aria-hidden="true"></span>
+          <span id="trust-badge-text"></span>
+        </button>
         <span class="status-sep">•</span>
         <span class="status-dim" id="status-sheet">—</span>
         <span class="toolbar-spacer"></span>
+        <span class="status-note" id="status-note" hidden></span>
         <span class="status-flash" id="status-flash"></span>
         <span class="status-dim" id="status-cells"></span>
       </footer>
@@ -180,6 +185,43 @@
             <p class="explain-dim">
               On Windows 11 you will find the context-menu entry under
               <strong>Show more options</strong> (Shift+F10).
+            </p>
+          </section>
+        </div>
+      </div>
+    </div>
+
+    <!-- What the open workbook carries besides cells -->
+    <div class="modal" id="trust" hidden>
+      <div class="modal-backdrop" data-close="1"></div>
+      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="trust-title">
+        <header class="modal-head">
+          <h2 id="trust-title">What this workbook carries</h2>
+          <button class="btn btn-icon" id="btn-trust-close" type="button" aria-label="Close">
+            <svg viewBox="0 0 24 24" class="icon" aria-hidden="true">
+              <path
+                d="M6.4 5 5 6.4 10.6 12 5 17.6 6.4 19 12 13.4 17.6 19 19 17.6 13.4 12 19 6.4 17.6 5 12 10.6 6.4 5Z"
+              />
+            </svg>
+          </button>
+        </header>
+
+        <div class="modal-body">
+          <p class="trust-summary" id="trust-summary"></p>
+          <dl class="facts" id="trust-facts"></dl>
+          <p class="hint" id="trust-note"></p>
+
+          <section class="explain">
+            <h3>Why this is worth knowing</h3>
+            <p>
+              Macros, external links, data connections, embedded objects and ActiveX controls are
+              all things a workbook can use to <em>run code</em> or <em>fetch data</em> when it is
+              opened in Excel or LibreOffice. They are not part of the cell values, so ExcelScry
+              shows the workbook without touching them.
+            </p>
+            <p class="explain-dim">
+              This is a description of the file, not a scan for malware. Open a workbook in Excel
+              only if you trust where it came from.
             </p>
           </section>
         </div>

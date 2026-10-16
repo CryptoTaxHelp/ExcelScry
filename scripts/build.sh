@@ -12,8 +12,15 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-VERSION="$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' src-tauri/tauri.conf.json | head -1)"
-: "${VERSION:=0.1.0}"
+# The version is read from the manifest, never hardcoded here: a stale literal
+# would silently mislabel the installer. scripts/bump_version.py keeps
+# tauri.conf.json, Cargo.toml, Cargo.lock and the README in step.
+VERSION="$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' src-tauri/tauri.conf.json 2>/dev/null | head -1)" || true
+if [[ -z "$VERSION" ]]; then
+    echo "error: no version found in src-tauri/tauri.conf.json" >&2
+    echo "       (scripts/bump_version.py writes it, and reports when it is missing)" >&2
+    exit 1
+fi
 
 echo "==> Building ExcelScry ${VERSION}"
 cargo tauri build

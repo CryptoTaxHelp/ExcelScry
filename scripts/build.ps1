@@ -11,7 +11,11 @@ $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $root
 
 $conf = Get-Content "src-tauri/tauri.conf.json" -Raw | ConvertFrom-Json
-$version = if ($conf.version) { $conf.version } else { "0.1.0" }
+# The version is read from the manifest, never hardcoded here: a stale literal
+# would silently mislabel the installer. scripts/bump_version.py keeps
+# tauri.conf.json, Cargo.toml, Cargo.lock and the README in step.
+$version = $conf.version
+if (-not $version) { throw "could not read the version from src-tauri/tauri.conf.json" }
 
 Write-Host "==> Building ExcelScry $version"
 cargo tauri build

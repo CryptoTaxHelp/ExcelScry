@@ -507,6 +507,9 @@ body {
   font-weight: 500;
   overflow: hidden;
   text-overflow: ellipsis;
+  /* Keep the file name readable: the badge, note and trailing readout all
+     ellipsize, so they absorb the squeeze instead. */
+  min-width: 110px;
 }
 
 .status-sep {
@@ -519,12 +522,111 @@ body {
   transition: opacity 0.2s ease;
 }
 
+/* Seen only for a macro-enabled workbook: quieter than the badge beside the
+   file name, but always there rather than fading like the flash. */
+.status-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  /* The sentence is the point of the note, so it never clips: the file name
+     and the trailing readout absorb the squeeze instead, both of which
+     ellipsize. */
+  flex: 0 0 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--amber);
+  font-size: 11px;
+}
+
+/* Both trailing readouts can shrink, so a long note squeezes them instead of
+   pushing them off the end of the bar. */
+#status-cells,
+#status-flash {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* Below this the bar cannot hold the file name, the badge, the sheet summary
+   and the whole sentence at once. The badge still names the hazard, so the
+   sentence steps aside rather than everything clipping into noise. The
+   threshold is just above the width at which the bar would overflow without
+   it. */
+@media (max-width: 719px) {
+  .status-note {
+    display: none;
+  }
+}
+
 .status-flash.show {
   opacity: 1;
 }
 
 .status-flash.is-error {
   color: #f87171;
+}
+
+/* What the open workbook carries: a one-chip summary that opens the detail. */
+.trust-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  /* Never the thing that gives: when the bar is tight the badge still has to
+     name the hazard, so the trailing readout absorbs the squeeze instead. */
+  flex: 0 0 auto;
+  padding: 1px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #0d1728;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 11px;
+  line-height: 16px;
+  cursor: pointer;
+}
+
+.trust-badge:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.trust-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-dim);
+}
+
+.trust-badge[data-level="clean"] {
+  color: var(--green);
+}
+
+.trust-badge[data-level="clean"] .trust-dot {
+  background: var(--green);
+}
+
+.trust-badge[data-level="partial"] .trust-dot {
+  background: var(--amber);
+}
+
+.trust-badge[data-level="warn"] {
+  border-color: #6b5316;
+  background: #2a2109;
+  color: var(--amber);
+}
+
+.trust-badge[data-level="warn"] .trust-dot {
+  background: var(--amber);
+}
+
+#trust-badge-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ------------------------------------------------------------------ modal */
@@ -617,6 +719,25 @@ body {
   margin: 12px 0 0;
   color: var(--text-dim);
   font-size: 12px;
+}
+
+.trust-summary {
+  margin: 0 0 14px;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.trust-hit {
+  color: var(--amber);
+}
+
+.trust-none {
+  color: var(--green);
+}
+
+.trust-skip {
+  color: var(--text-dim);
+  font-style: italic;
 }
 
 .modal-actions {

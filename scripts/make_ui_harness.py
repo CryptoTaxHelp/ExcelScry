@@ -94,15 +94,90 @@ const SHEETS = [
   { name: "Unicode & escaping", rows: 12, cols: 3, firstUsed: 0, cell: markupCell },
 ];
 
+// Opening a mock path ending in these names exercises each badge state.
+const TRUST_REPORTS = {
+  xlsx: {
+    hazards: [],
+    unchecked: [],
+    badge: "No macros or links",
+    level: "clean",
+    detail: {
+      macros: false,
+      externalLinks: 0,
+      connections: false,
+      embeddedObjects: 0,
+      activex: false,
+    },
+  },
+  xlsm: {
+    hazards: ["Macros"],
+    unchecked: [],
+    badge: "Macros",
+    level: "warn",
+    detail: {
+      macros: true,
+      externalLinks: 0,
+      connections: false,
+      embeddedObjects: 0,
+      activex: false,
+    },
+  },
+  risky: {
+    hazards: [
+      "Macros",
+      "2 external links",
+      "Data connections",
+      "1 embedded object",
+      "ActiveX controls",
+    ],
+    unchecked: [],
+    // Capped by the Rust side to fit the status bar; `hazards` keeps them all.
+    badge: "Macros, 2 external links, +3 more",
+    level: "warn",
+    detail: {
+      macros: true,
+      externalLinks: 2,
+      connections: true,
+      embeddedObjects: 1,
+      activex: true,
+    },
+  },
+  // A legacy .xls: macros can be checked, nothing else can.
+  xls: {
+    hazards: [],
+    unchecked: ["external links", "data connections", "embedded objects", "ActiveX controls"],
+    badge: "No macros",
+    level: "partial",
+    detail: {
+      macros: false,
+      externalLinks: null,
+      connections: null,
+      embeddedObjects: null,
+      activex: null,
+    },
+  },
+};
+
+function trustFor(path) {
+  const name = String(path).split(/[\\/]/).pop().toLowerCase();
+  if (name.includes("risky")) return TRUST_REPORTS.risky;
+  if (name.endsWith(".xls")) return TRUST_REPORTS.xls;
+  if (name.endsWith(".xlsm")) return TRUST_REPORTS.xlsm;
+  return TRUST_REPORTS.xlsx;
+}
+
 function workbookInfo(path) {
+  const name = String(path).split(/[\\/]/).pop();
+  const trust = trustFor(path);
   return {
     path,
-    fileName: "ExcelScry-sample.xlsx",
+    fileName: name,
     format: "Excel Workbook (xlsx)",
     fileSize: 43341,
     truncated: false,
     totalCells: 0,
     usedCells: 6423,
+    trust,
     sheets: SHEETS.map((s) => ({
       name: s.name,
       rows: s.rows,

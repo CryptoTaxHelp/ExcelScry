@@ -12,6 +12,8 @@ use spreadsheet_ods::format::ValueFormatText;
 use spreadsheet_ods::{write_ods, CellStyle, CellStyleRef, Sheet, WorkBook};
 
 use crate::model::{Cell, LoadedWorkbook};
+#[cfg(test)]
+use crate::trust::{Trust, TrustReport};
 
 /// What the user gets told after a successful export.
 #[derive(Debug, Clone, Serialize)]
@@ -65,9 +67,14 @@ pub fn export(workbook: &LoadedWorkbook, out: &Path) -> Result<ExportSummary, St
                     Cell::Float(v) => {
                         write_cell(&mut ods_sheet, row_u32, col_u32, *v, styled, &header)
                     }
-                    Cell::Text(s) => {
-                        write_cell(&mut ods_sheet, row_u32, col_u32, s.as_str(), styled, &header)
-                    }
+                    Cell::Text(s) => write_cell(
+                        &mut ods_sheet,
+                        row_u32,
+                        col_u32,
+                        s.as_str(),
+                        styled,
+                        &header,
+                    ),
                     Cell::Bool(b) => {
                         write_cell(&mut ods_sheet, row_u32, col_u32, *b, styled, &header)
                     }
@@ -81,9 +88,14 @@ pub fn export(workbook: &LoadedWorkbook, out: &Path) -> Result<ExportSummary, St
                         write_cell(&mut ods_sheet, row_u32, col_u32, *d, styled, &header)
                     }
                     // Errors have no ODS value type of their own; keep the text.
-                    Cell::Error(e) => {
-                        write_cell(&mut ods_sheet, row_u32, col_u32, e.as_str(), styled, &header)
-                    }
+                    Cell::Error(e) => write_cell(
+                        &mut ods_sheet,
+                        row_u32,
+                        col_u32,
+                        e.as_str(),
+                        styled,
+                        &header,
+                    ),
                 }
                 cells += 1;
             }
@@ -258,6 +270,7 @@ mod tests {
             truncated: false,
             total_cells: 20,
             used_cells: 10,
+            trust: TrustReport::new(Trust::unknown()),
         }
     }
 

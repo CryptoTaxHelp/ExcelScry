@@ -1,0 +1,151 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+# Only `release` writes to the repository, and it asks for that permission
+# itself. Everything else runs read-only: the installer is uploaded as a
+# workflow artifact, not as a release asset.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+# A newer push to the same ref makes an in-flight run pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Tests, lints, formatting and version bookkeeping. ExcelScry is Windows-only
+  # — the shell integration is built on winreg and windows-sys — so the checks
+  # run on Windows rather than on a cheaper Linux runner that could not build it.
+  checks:
+    name: Tests, clippy, formatting and version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust, with clippy and rustfmt
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Check formatting
+        working-directory: src-tauri
+        run: cargo fmt --all --check
+
+      # --locked makes the committed Cargo.lock part of the contract: CI fails
+      # if a dependency change was never written back to it.
+      - name: Lint
+        working-directory: src-tauri
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Test
+        working-directory: src-tauri
+        run: cargo test --locked
+
+      # The version is repeated in four files. A bump that misses one mislabels
+      # the installer rather than failing, so check them here, on every push.
+      - name: Check that the version copies agree
+        run: python scripts/bump_version.py --check
+
+  # The portable executable and the NSIS installer, built the same way
+  # scripts/build.sh builds them locally. No tagName/releaseId is passed, so
+  # nothing is published; the bundles are uploaded as a workflow artifact.
+  # Skipped for a tag, which the release job below builds once.
+  installer:
+    name: Windows installer
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      # No Node or npm setup is needed: the front end is plain HTML/CSS/JS that
+      # `frontendDist` points straight at, and there is no beforeBuildCommand.
+      #
+      # No NSIS install step either: tauri-bundler fetches and hash-verifies
+      # its own toolset (NSIS_URL in tauri-bundler's windows/nsis module).
+      - name: Build the app and the installer
+        uses: tauri-apps/tauri-action@v1
+        with:
+          projectPath: src-tauri
+          uploadWorkflowArtifacts: true
+          # The portable executable is a first-class deliverable, so the
+          # artifact carries it alongside the installer's bundles.
+          uploadPlainBinary: true
+          # Nothing is released, so the updater files have nowhere to go.
+          uploadUpdaterJson: false
+          uploadUpdaterSignatures: false
+
+  # Pushing a v* tag publishes the release. This is the only job that writes to
+  # the repository, and it refuses to publish a tag that disagrees with the
+  # manifests, so a mislabelled release cannot get out.
+  release:
+    name: Release
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # `release_notes.py` reads the commit history since the previous tag,
+          # so the clone needs all of it — depth 0 fetches every branch and tag.
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Check that the tag names the version
+        run: python scripts/bump_version.py --check --tag "${{ github.ref_name }}"
+
+      - name: Build the release notes
+        id: notes
+        shell: bash
+        run: |
+          python scripts/release_notes.py --out release-notes.md
+          {
+            echo "body<<RELEASE_NOTES_EOF"
+            cat release-notes.md
+            echo "RELEASE_NOTES_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and publish the release
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: src-tauri
+          tagName: ${{ github.ref_name }}
+          releaseName: ExcelScry ${{ github.ref_name }}
+          # Our curated changelog entry and commit list, with GitHub's own
+          # generated notes appended after it.
+          releaseBody: ${{ steps.notes.outputs.body }}
+          generateReleaseNotes: true
+          # Both deliverables reach the release page: the portable executable
+          # and the NSIS installer.
+          uploadPlainBinary: true
+          uploadUpdaterJson: false
+          uploadUpdaterSignatures: false

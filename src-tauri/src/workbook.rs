@@ -11,6 +11,7 @@ use calamine::{open_workbook_auto, Data, Error as CalamineError, Reader};
 use chrono::NaiveTime;
 
 use crate::model::{Cell, LoadedWorkbook, SheetData};
+use crate::trust::{self, TrustReport};
 
 /// Upper bound on materialised cells (including sparse padding), so a
 /// pathologically large sheet degrades into a truncated view instead of
@@ -23,7 +24,8 @@ const MAX_COLS: usize = 16_384;
 
 /// Load a workbook from disk.
 pub fn load(path: &Path) -> Result<LoadedWorkbook, String> {
-    let meta = fs::metadata(path).map_err(|e| format!("Cannot open \"{}\": {e}", path.display()))?;
+    let meta =
+        fs::metadata(path).map_err(|e| format!("Cannot open \"{}\": {e}", path.display()))?;
     if meta.is_dir() {
         return Err(format!(
             "\"{}\" is a folder. Choose a spreadsheet file.",
@@ -32,6 +34,9 @@ pub fn load(path: &Path) -> Result<LoadedWorkbook, String> {
     }
 
     let mut book = open_workbook_auto(path).map_err(|e| describe(path, &e))?;
+    // Inspect the package before lifting any cells: what a workbook *carries*
+    // is worth knowing even before it is read, and it never blocks the open.
+    let trust = TrustReport::new(trust::inspect(path, &mut book));
     let names = book.sheet_names();
 
     let mut sheets = Vec::with_capacity(names.len());
@@ -43,7 +48,10 @@ pub fn load(path: &Path) -> Result<LoadedWorkbook, String> {
             Ok(r) => r,
             // A single unreadable sheet should not sink the whole workbook.
             Err(e) => {
-                return Err(format!("Cannot read sheet \"{name}\": {}", describe(path, &e)));
+                return Err(format!(
+                    "Cannot read sheet \"{name}\": {}",
+                    describe(path, &e)
+                ));
             }
         };
 
@@ -128,7 +136,12 @@ pub fn load(path: &Path) -> Result<LoadedWorkbook, String> {
 
     let used_cells = sheets
         .iter()
-        .map(|s| s.rows.iter().map(|r| r.iter().filter(|c| !c.is_empty()).count()).sum::<usize>())
+        .map(|s| {
+            s.rows
+                .iter()
+                .map(|r| r.iter().filter(|c| !c.is_empty()).count())
+                .sum::<usize>()
+        })
         .sum();
 
     let file_name = path
@@ -145,6 +158,7 @@ pub fn load(path: &Path) -> Result<LoadedWorkbook, String> {
         truncated,
         total_cells: MAX_CELLS - budget,
         used_cells,
+        trust,
     })
 }
 
@@ -244,7 +258,9 @@ fn describe(path: &Path, e: &CalamineError) -> String {
         // A damaged file, a renamed file, and a workbook protected with a
         // password all surface as a format-level parse error. Say that plainly
         // instead of leaking a zip/xml diagnostic at the user.
-        CalamineError::Xlsx(_) | CalamineError::Xls(_) | CalamineError::Xlsb(_)
+        CalamineError::Xlsx(_)
+        | CalamineError::Xls(_)
+        | CalamineError::Xlsb(_)
         | CalamineError::Ods(_) => format!(
             "\"{name}\" could not be opened. It may be damaged, password-protected, \
              or not really a spreadsheet. {SUPPORTED}"
@@ -322,7 +338,10 @@ mod tests {
             parse_iso("2026-10-15T00:00:00"),
             Cell::DateTime(d.and_hms_opt(0, 0, 0).unwrap())
         );
-        assert_eq!(parse_iso("2026-10-15"), Cell::DateTime(d.and_hms_opt(0, 0, 0).unwrap()));
+        assert_eq!(
+            parse_iso("2026-10-15"),
+            Cell::DateTime(d.and_hms_opt(0, 0, 0).unwrap())
+        );
         // Anything unparseable is preserved verbatim rather than dropped.
         assert_eq!(parse_iso("not a date"), Cell::Text("not a date".into()));
     }

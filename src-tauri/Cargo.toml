@@ -19,6 +19,8 @@ serde_json = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 calamine = { version = "0.36.1", features = ["dates"] }
 spreadsheet-ods = "1.0.4"
+# Already in the tree via calamine; used directly to list a package's parts.
+zip = "8.6.0"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56.0"

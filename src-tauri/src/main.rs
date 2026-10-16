@@ -5,6 +5,7 @@
 mod associations;
 mod model;
 mod ods_export;
+mod trust;
 mod workbook;
 
 use std::path::{Path, PathBuf};
@@ -112,7 +113,8 @@ fn get_rows(
     col_count: usize,
     state: State<'_, AppState>,
 ) -> Result<RowsPage, String> {
-    state.with_workbook(|wb| wb.page(sheet, row_start, row_count, col_start, col_count))?
+    state
+        .with_workbook(|wb| wb.page(sheet, row_start, row_count, col_start, col_count))?
         .ok_or_else(|| "That worksheet no longer exists.".to_string())
 }
 
@@ -336,7 +338,11 @@ mod tests {
         assert_eq!(first_file_arg(&args), None);
 
         // A real file is picked up even when it follows flags.
-        let args = vec![exe, "--flag".to_string(), std::env::temp_dir().display().to_string()];
+        let args = vec![
+            exe,
+            "--flag".to_string(),
+            std::env::temp_dir().display().to_string(),
+        ];
         // A directory is not a file, so this stays None.
         assert_eq!(first_file_arg(&args), None);
     }

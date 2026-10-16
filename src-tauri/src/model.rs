@@ -7,6 +7,8 @@
 use chrono::{Duration, NaiveDateTime, NaiveTime};
 use serde::Serialize;
 
+use crate::trust::TrustReport;
+
 /// A single cell, preserving enough type information to export faithfully.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Cell {
@@ -162,6 +164,8 @@ pub struct LoadedWorkbook {
     pub total_cells: usize,
     /// Count of non-empty cells across all sheets.
     pub used_cells: usize,
+    /// Macros, links and other active content found in the package.
+    pub trust: TrustReport,
 }
 
 /// One cell as sent over IPC: `[kind, display]`. `None` means empty.
@@ -207,6 +211,7 @@ pub struct WorkbookInfo {
     pub truncated: bool,
     pub total_cells: usize,
     pub used_cells: usize,
+    pub trust: TrustReport,
 }
 
 impl LoadedWorkbook {
@@ -234,6 +239,7 @@ impl LoadedWorkbook {
             truncated: self.truncated,
             total_cells: self.total_cells,
             used_cells: self.used_cells,
+            trust: self.trust.clone(),
         }
     }
 
@@ -332,14 +338,8 @@ mod tests {
     #[test]
     fn durations_do_not_wrap_at_24_hours() {
         assert_eq!(Cell::Duration(Duration::hours(36)).display(), "36:00:00");
-        assert_eq!(
-            Cell::Duration(Duration::seconds(3723)).display(),
-            "1:02:03"
-        );
-        assert_eq!(
-            Cell::Duration(Duration::seconds(-90)).display(),
-            "-0:01:30"
-        );
+        assert_eq!(Cell::Duration(Duration::seconds(3723)).display(), "1:02:03");
+        assert_eq!(Cell::Duration(Duration::seconds(-90)).display(), "-0:01:30");
     }
 
     #[test]

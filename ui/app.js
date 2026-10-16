@@ -77,6 +77,10 @@ const els = {
   statusSheet: document.getElementById("status-sheet"),
   statusCells: document.getElementById("status-cells"),
   statusFlash: document.getElementById("status-flash"),
+  statusNote: document.getElementById("status-note"),
+  trustBadge: document.getElementById("trust-badge"),
+  trustBadgeText: document.getElementById("trust-badge-text"),
+  trust: document.getElementById("trust"),
   btnOpen: document.getElementById("btn-open"),
   btnOpen2: document.getElementById("btn-open-2"),
   btnExport: document.getElementById("btn-export"),
@@ -467,6 +471,7 @@ async function chooseFile() {
 
 function closeWorkbook() {
   state.info = null;
+  closeTrust();
   resetTiles();
   els.viewer.hidden = true;
   els.welcome.hidden = false;
@@ -530,6 +535,8 @@ function setSheet(index) {
 }
 
 function updateStatus() {
+  updateTrustBadge();
+  updateStatusNote();
   const info = state.info;
   if (!info) {
     els.statusFile.textContent = "No file open";
@@ -551,6 +558,116 @@ function updateStatus() {
     bits.push(`data starts at row ${(sheet.firstUsedRow + 1).toLocaleString()}`);
   }
   els.statusCells.textContent = bits.join("  ·  ");
+}
+
+// --------------------------------------------------------------------------
+// What the workbook carries: macros, links and other active content
+// --------------------------------------------------------------------------
+
+/** `["a", "b", "c"]` -> `"a, b and c"`. */
+function joinList(items) {
+  if (!items.length) return "";
+  if (items.length === 1) return items[0];
+  return `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+}
+
+/**
+ * A standing line for a macro-enabled workbook, on top of the badge. The badge
+ * says macros are there; this says what ExcelScry does about them, which is the
+ * part that stops someone assuming the viewer would have offered to run them.
+ */
+function updateStatusNote() {
+  const trust = state.info && state.info.trust;
+  const macros = Boolean(trust && trust.detail.macros === true);
+  els.statusNote.hidden = !macros;
+  els.statusNote.textContent = macros ? "Macros present — ExcelScry will not run them" : "";
+}
+
+function updateTrustBadge() {
+  const trust = state.info && state.info.trust;
+  if (!trust) {
+    els.trustBadge.hidden = true;
+    return;
+  }
+  els.trustBadge.hidden = false;
+  els.trustBadge.dataset.level = trust.level;
+  els.trustBadgeText.textContent = trust.badge;
+
+  // The badge is the only place the unexamined signals are visible without a
+  // click, so spell them out in the tooltip rather than letting "No macros"
+  // read as a clean bill of health.
+  // When nothing was found, repeat what *was* checked (the badge) rather than
+  // claiming a bare "nothing found" for signals that never ran.
+  const lines = [
+    trust.hazards.length ? `Present: ${trust.hazards.join(", ")}.` : `${trust.badge}.`,
+  ];
+  if (trust.unchecked.length) {
+    lines.push(`This format gives no way to check ${joinList(trust.unchecked)}.`);
+  }
+  lines.push("Click for details.");
+  els.trustBadge.title = lines.join(" ");
+}
+
+/** The five signals, in the order they are reported. */
+const TRUST_ROWS = [
+  ["macros", "Macros"],
+  ["externalLinks", "External links"],
+  ["connections", "Data connections"],
+  ["embeddedObjects", "Embedded objects"],
+  ["activex", "ActiveX controls"],
+];
+
+/** `null` means the format gave no way to look, which is not the same as "none". */
+function trustValueHtml(value) {
+  if (value === null || value === undefined) {
+    return '<span class="trust-skip">Not checked</span>';
+  }
+  if (typeof value === "number") {
+    if (value === 0) return '<span class="trust-none">None found</span>';
+    return `<span class="trust-hit">${value.toLocaleString()} found</span>`;
+  }
+  return value
+    ? '<span class="trust-hit">Present</span>'
+    : '<span class="trust-none">None found</span>';
+}
+
+function openTrust() {
+  const trust = state.info && state.info.trust;
+  if (!trust) return;
+  els.trust.hidden = false;
+
+  document.getElementById("trust-facts").innerHTML = TRUST_ROWS.map(
+    ([key, label]) =>
+      `<div><dt>${esc(label)}</dt><dd>${trustValueHtml(trust.detail[key])}</dd></div>`
+  ).join("");
+
+  // `badge` is capped for the status bar; the dialog has room for the lot.
+  const tone = trust.hazards.length ? "trust-hit" : "trust-none";
+  const summary = trust.hazards.length ? trust.hazards.join(", ") : trust.badge;
+  document.getElementById("trust-summary").innerHTML =
+    `<span class="${tone}">${esc(summary)}</span>`;
+
+  const notes = [];
+  if (trust.hazards.length) {
+    notes.push(
+      "ExcelScry only reads the cell values, so none of this has been run. Opening the workbook in Excel or LibreOffice is what would activate it."
+    );
+  } else if (!trust.unchecked.length) {
+    notes.push(
+      "ExcelScry checked every part of this package and found no macros, links or other active content."
+    );
+  }
+  if (trust.unchecked.length) {
+    const caveat = trust.hazards.length ? "" : ", so an empty result is not a clean bill of health";
+    notes.push(
+      `This format gives ExcelScry no way to check ${joinList(trust.unchecked)}${caveat}.`
+    );
+  }
+  document.getElementById("trust-note").textContent = notes.join(" ");
+}
+
+function closeTrust() {
+  els.trust.hidden = true;
 }
 
 // --------------------------------------------------------------------------
@@ -630,6 +747,12 @@ function initEvents() {
     if (event.target.dataset.close) closeSettings();
   });
 
+  els.trustBadge.addEventListener("click", openTrust);
+  document.getElementById("btn-trust-close").addEventListener("click", closeTrust);
+  els.trust.addEventListener("click", (event) => {
+    if (event.target.dataset.close) closeTrust();
+  });
+
   document
     .getElementById("btn-assoc-install")
     .addEventListener("click", () => withSettingsRefresh("install_associations"));
@@ -689,9 +812,10 @@ function initEvents() {
 function onKeyDown(event) {
   if (event.key === "Escape") {
     closeSettings();
+    closeTrust();
     return;
   }
-  if (!state.info || !els.settings.hidden) return;
+  if (!state.info || !els.settings.hidden || !els.trust.hidden) return;
   if (event.ctrlKey && event.key.toLowerCase() === "o") {
     event.preventDefault();
     chooseFile();
