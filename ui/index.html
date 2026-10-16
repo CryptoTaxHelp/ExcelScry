@@ -198,8 +198,9 @@
 
           <p class="hint" id="update-note">
             ExcelScry asks the latest GitHub release for its manifest when it starts, and offers a
-            newer version in the status bar. Nothing is downloaded until you ask for it, and what
-            is downloaded has to match the release signature before it is installed.
+            newer version in the status bar. Nothing is downloaded until you ask for it - and
+            installing asks once more, with the release's own summary above. What is downloaded has
+            to match the release signature before it is installed.
           </p>
 
           <!-- What the release says about itself, shown only when there is a
@@ -253,6 +254,49 @@
               only if you trust where it came from.
             </p>
           </section>
+        </div>
+      </div>
+    </div>
+
+    <!-- The last thing between a click and a download: the release's own first
+         few points, which arrive with the update check that already ran, and
+         what installing actually does. -->
+    <div class="modal" id="update-confirm" hidden>
+      <div class="modal-backdrop" data-close="1"></div>
+      <div
+        class="modal-card"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="update-confirm-title"
+      >
+        <header class="modal-head">
+          <h2 id="update-confirm-title">Install the update?</h2>
+          <button class="btn btn-icon" id="btn-update-cancel-x" type="button" aria-label="Close">
+            <svg viewBox="0 0 24 24" class="icon" aria-hidden="true">
+              <path
+                d="M6.4 5 5 6.4 10.6 12 5 17.6 6.4 19 12 13.4 17.6 19 19 17.6 13.4 12 19 6.4 17.6 5 12 10.6 6.4 5Z"
+              />
+            </svg>
+          </button>
+        </header>
+
+        <div class="modal-body">
+          <section class="release-notes" id="update-summary-section" hidden>
+            <h4 id="update-summary-title">What's new</h4>
+            <ul class="release-summary" id="update-summary"></ul>
+            <p class="hint" id="update-summary-more"></p>
+          </section>
+
+          <p class="hint">
+            Installing downloads the installer, checks it against the release signature before
+            anything is run, and hands it to Windows: ExcelScry closes and restarts when it is
+            finished.
+          </p>
+
+          <div class="modal-actions">
+            <button class="btn" id="btn-update-cancel" type="button">Not now</button>
+            <button class="btn btn-primary" id="btn-update-go" type="button">Install update</button>
+          </div>
         </div>
       </div>
     </div>

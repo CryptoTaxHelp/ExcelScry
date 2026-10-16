@@ -836,6 +836,11 @@ body {
   margin-top: 12px;
 }
 
+/* In the confirmation box there is nothing above it to separate it from. */
+.release-notes:first-child {
+  margin-top: 0;
+}
+
 .release-notes h4 {
   margin: 0 0 6px;
   font-size: 12px;
@@ -888,7 +893,41 @@ body {
   color: var(--text);
 }
 
-.release-notes-body code {
+/* The short version of those notes, in the dialog that asks before installing:
+   the release's own opening lines, not a paraphrase of them. */
+.release-summary {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.release-summary li {
+  margin: 0 0 4px;
+}
+
+.release-summary strong {
+  color: var(--text);
+}
+
+/* A link from the release notes. Underlined so it reads as something to click,
+   in the accent the app already uses for what to do next. */
+.note-link {
+  color: var(--accent);
+  text-decoration: underline;
+  text-decoration-color: rgba(56, 189, 248, 0.45);
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.note-link:hover {
+  color: #5cc9fa;
+  text-decoration-color: currentColor;
+}
+
+.release-notes-body code,
+.release-summary code {
   background: #0d1728;
   border: 1px solid var(--line);
   border-radius: 4px;

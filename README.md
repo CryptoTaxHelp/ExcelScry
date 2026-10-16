@@ -186,24 +186,84 @@ ExcelScry updates itself from its own GitHub releases. At start-up it fetches
 builds — and, if that names a newer version, the status bar offers it as
 **Update to *x.y.z***. Nothing is downloaded until that is clicked. The same
 state lives in **Settings › Updates**: *This build*, *Release manifest*, a
-manual *Check for updates*, and *Install update* when there is one. A start-up
-check that cannot reach GitHub says nothing; a manual one reports the reason.
+manual *Check for updates*, *Install update* when there is one, and — when an
+update is available — the release's own notes, so what changed can be read
+before anything is downloaded. Installing asks once more: the status-bar pill
+and the dialog's button open a confirmation carrying the release's opening
+points, and nothing is downloaded until it is answered. A start-up check that
+cannot reach GitHub says nothing; a manual one reports the reason.
 
-Installing means: download the installer, verify it, hand it to Windows. The
-verification is the point of the arrangement:
+Installing means: fetch the manifest, verify it, download the installer, verify
+that too, hand it to Windows. The verification is the point of the arrangement,
+and both signatures are checked against a key this build trusts: the `pubkey` in
+`src-tauri/tauri.conf.json`, and any key a signed manifest has handed over since
+([The signing key](#the-signing-key)):
 
-- The manifest's `signature` is a [minisign](https://jedisct1.github.io/minisign/)
-  signature over the installer, checked against the `pubkey` in
-  `src-tauri/tauri.conf.json` **before the installer is allowed to run**. Anyone
-  who can push to this repository can replace an asset; only the holder of the
-  private key can produce an installer those bytes will accept.
-- `requireSignedVersion` is on, so the artifact must also have been signed *for
-  the version the manifest announced*. `tauri build` stamps the version into the
-  signature's trusted comment, and the release job refuses a tag that disagrees
-  with the manifest — so the two numbers agree on every release this app can
-  update from. Without that check, a rewritten manifest could pair a new version
-  number with the signature and URL of an older, genuinely signed release and
-  talk the app into reinstalling it.
+- **The manifest is signed.** `latest.json.sig` is published beside `latest.json`
+  on the release page, and the app verifies it over the manifest's own bytes
+  *before it reads a field out of it*
+  ([manifest.rs](src-tauri/src/manifest.rs)). Nothing else here would matter if
+  the version, the notes and the installer's URL were whatever the endpoint
+  happened to serve: TLS proves those bytes came from GitHub, not that GitHub's
+  bytes are the ones this project put there.
+- **The installer is signed.** Its `signature` — a
+  [minisign](https://jedisct1.github.io/minisign/) signature over the installer
+  — is checked while it is downloaded and **before it is allowed to run**,
+  against the key the manifest names for this platform: the one this build ships
+  with, or one the same manifest handed over. Anyone who can push to this
+  repository can replace an asset; only the holder of the private key can
+  produce an installer those bytes will accept.
+- **Both signatures record the version they were made for**, and both are
+  compared with the version the manifest announces: the manifest's by the app,
+  the installer's by the updater, whose `requireSignedVersion` is on. `tauri
+  build` and the release job stamp that version into the signatures' trusted
+  comments, and the release job refuses a tag that disagrees with the manifest —
+  so the numbers agree on every release this app can update from. Without that
+  binding, a genuinely signed manifest and a genuinely signed installer could be
+  paired across releases.
+- **A release can replace the key.** The manifest may carry a `keys` block: keys
+  to start accepting, and keys to retire. It is only taken from a manifest whose
+  signature has already been checked, and it is merged into a record kept beside
+  the app's own data, so nothing an older manifest says puts a retired key back.
+  That is what makes a key that has leaked something the next release retires by
+  saying so — rather than something every installed copy has to be walked
+  forward from first.
+
+An update that cannot be verified is one the app will not use: a manifest with
+no signature beside it, or one whose signature does not cover it, is reported in
+the status bar like any other failed check.
+
+There is no moment when a copy can be offered an unsigned one. The release job
+builds the release as a **draft** — the endpoint the app asks resolves to the
+latest release that is neither a draft nor a pre-release, so while the manifest
+is being signed that endpoint is still answering with the previous release's
+signed manifest — and the manifest, its signature and the key roll in it are
+read back out of the draft and checked before the release is published. The
+reveal is the last step of the job, so a build that fails anywhere before it
+leaves a draft no copy can see, rather than a public release nobody could update
+from ([Continuous integration](#continuous-integration)).
+
+The notes are the release body, so they arrive with the manifest and are covered
+by its signature like every other field in it. They are still rendered as text —
+headings, bullets and emphasis from the shapes this project's own notes use, with
+`createElement` and `createTextNode` rather than `innerHTML`, and everything else
+left literal — because a release body is Markdown, not HTML. A note containing
+markup shows the characters, not the markup.
+
+A link is the one thing a release body can ask the app to *do*, so it is the one
+shape handled with care. Only `http` and `https` are links: `javascript:`, `data:`
+and `file:` stay the characters someone typed. Clicking a link is handled in the
+front end, so the window never navigates away from the app, and the address is
+checked again in Rust and opened with the shell — in the default browser, not in
+this window.
+
+Every release is checked this way once it is published: the `verify-release` job
+in CI fetches `latest.json` and the signature beside it from the endpoint above,
+verifies both the manifest and the installer it points at against a key this
+build trusts, and holds the key roll the manifest carries to the one this
+repository publishes ([Continuous integration](#continuous-integration)), so a
+release an installed copy could not use — or one handing over a key nobody
+agreed to — fails its own run rather than a user's update check.
 
 A failed download is reported in the status bar and changes nothing: the
 signature mismatch, the version mismatch and the unsigned case each have their
@@ -227,36 +287,66 @@ cargo tauri signer generate -w ~/.tauri/ExcelScry.key
   installer jobs read. It was generated with an empty password, so no
   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` is needed; set both if that ever changes.
 
-Rotate by generating a new keypair and committing the new public key **only
-along with a release signed by the new private key**: an app that has the old
-public key cannot update to a build signed with a new one, so a rotation needs
-one release signed by the key the installed version already trusts.
+Rotate by generating a new keypair, putting its **public** half in
+[`src-tauri/updater-keys.json`](src-tauri/updater-keys.json), and letting a
+release publish that roll — `scripts/manifest_keys.py` writes it into
+`latest.json` before the release job signs it, and an installed copy takes it
+from there. Committing the new key to `tauri.conf.json` is then only a matter of
+how *new* builds start out, and can wait until the copies in the field have been
+handed the key.
+
+The two lists are the roll. `added` is published in every release until the key
+it names is the one in `tauri.conf.json`, because a copy learns it from whichever
+release it happens to check; `retired` stays listed for the same reason, and one
+release is enough to retire a key — a copy that checks the endpoint after it was
+published acts on it, and merges it into what it already knows rather than
+replacing it. The record of all that is
+`%LOCALAPPDATA%\com.excelscry.viewer\updater-keys.json`, which is per-user, is
+not part of the installation, and is the file to delete to go back to the key a
+build ships with.
+
+A copy that never checks for updates again keeps the trust it had, so retiring a
+key that has leaked and *keeping* every copy updateable are in tension: the
+release that retires it reaches the copies that ask, and the stragglers it does
+not reach keep trusting a compromised key — which is the reason to retire it
+promptly rather than wait for them, and the reason a copy that has fallen far
+enough behind may have to be updated by hand.
 
 ### What a release has to carry
 
 The updater works from the first release built by this workflow; a release
 published before it has no `latest.json`, so the endpoint answers 404 and the
 start-up check stays quiet by design. The release job sets
-`uploadUpdaterJson: true` (plus `uploadUpdaterSignatures`, and
-`updaterJsonPreferNsis: true` because the manifest is built from the NSIS
-`.sig`), which is what puts these two assets on the release page:
+`uploadUpdaterJson: true` (plus `uploadUpdaterSignatures`, `uploadPlainBinary`,
+and `updaterJsonPreferNsis: true` because the manifest is built from the NSIS
+`.sig`), which is what puts the installer, its signature, the portable executable
+and `latest.json` on the release page, and `releaseDraft: true`, which is what
+keeps that page out of reach until the two steps after it have signed the
+manifest and checked it back:
 
-| Asset | What the updater does with it |
+| Asset | What the app does with it |
 |---|---|
-| `latest.json` | `version`, `notes`, `pub_date` and a `platforms` map keyed `windows-x86_64` (and `windows-x86_64-nsis`) |
-| `*.exe.sig` | the signature `latest.json` embeds for that platform |
+| `latest.json` | `version`, `notes`, `pub_date`, a `platforms` map keyed `windows-x86_64` (and `windows-x86_64-nsis`), and the `keys` roll the release is publishing |
+| `ExcelScry_<version>_x64-setup.exe` | the installer an update downloads and runs |
+| `ExcelScry_<version>_x64-setup.exe.sig` | the signature `latest.json` embeds for that platform |
+| `latest.json.sig` | the signature over `latest.json` itself, which the app checks before it uses anything in it |
+| `ExcelScry_windows_x64.exe` | nothing: this is the portable build, which the app never updates from, so nothing is signed for it. Its version resource is the one checkable thing it carries, and the release check holds it to the version the manifest announces |
 
 ## Repository layout
 
 ```
 ui/                     front end: index.html, styles.css, app.js (no bundler)
-src-tauri/src/
+src-tauri/
+  updater-keys.json     the key roll releases publish: keys handed over, keys retired
+  src/
   main.rs               Tauri commands, window setup, single-instance handling
   model.rs              cell model and per-type display formatting
   workbook.rs           reading via calamine, absolute-coordinate normalisation
   ods_export.rs         writing ODS via spreadsheet-ods
   trust.rs              package inspection: macros, links, connections, objects
   update.rs             update check and install, on tauri-plugin-updater
+  manifest.rs           fetching the update manifest, checking its signature, and
+                        the key roll a release carries
   associations.rs       Windows registry contract for the shell integration
   windows/hooks.nsh     NSIS installer hooks (context menu, associations)
 scripts/
@@ -267,6 +357,13 @@ scripts/
   make_ui_harness.py    generates test/ui-harness.html
   bump_version.py       writes the version to every copy, or fails when they disagree
   release_notes.py      builds the release notes from the changelog and git history
+  release.py            bumps, moves the changelog, commits, tags and pushes
+  test_release.py       runs that release flow against a throwaway repository
+  verify_release.py     checks that a published release can update an installed copy,
+                        and that its key roll is the one this repository publishes
+  manifest_keys.py      writes that key roll into the manifest before it is signed
+  verify_workflow.py    checks that no release can be published before its manifest
+                        is signed
   build.sh / build.ps1  build and collect artifacts
   capture-window.ps1    screenshot a running app window (verification aid)
 samples/                sample workbooks covering the awkward cases: one with a
@@ -278,7 +375,7 @@ samples/                sample workbooks covering the awkward cases: one with a
 ## Tests
 
 ```bash
-cd src-tauri && cargo test        # 49 unit tests
+cd src-tauri && cargo test        # 74 unit tests
 cd src-tauri && cargo clippy --all-targets
 ```
 
@@ -291,6 +388,18 @@ The tests cover the parts that are easy to get subtly wrong:
 - `parse_iso` treating Excel's day zero (`1899-12-30`) as a **time of day** —
   ODF stores a bare time as an ISO duration and calamine returns it as a
   datetime on that date, which would otherwise render as `1899-12-30 09:30:00`;
+- the update manifest's signature, against a manifest signed by this project's
+  own release key: an edited manifest, one signed by another key, one signed for
+  a version it does not announce and one signed without a version at all are each
+  refused, and the endpoint's variables are resolved the way the updater
+  resolves them;
+- the **key roll** a release may carry, against a manifest signed with the very
+  key it retires: taking the roll leaves the new key trusted and the old one
+  refused for both fixtures, an adopted key is what a manifest is then checked
+  with, a roll naming something that is not a key or retiring everything is
+  refused without being recorded, a retirement is written to disk and read back
+  by the next run (and a damaged record refuses rather than forgetting one), and
+  the updater's own manifest type still reads a document that carries a roll;
 - the registry contract: the verb label, the quoted `"exe" "%1"` command, that
   `.xlsm` is registered exactly like `.xlsx` and `.xls`, and that uninstall
   removes exactly what install created;
@@ -339,6 +448,9 @@ cargo fmt --all --check
 cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
 python scripts/bump_version.py --check
+python scripts/manifest_keys.py --check
+python scripts/verify_workflow.py
+python scripts/test_release.py
 ```
 
 So formatting is enforced, a new clippy warning fails the build, and `--locked`
@@ -347,6 +459,30 @@ pushing** — the check reports a diff rather than rewriting files for you. The
 same job runs `python scripts/bump_version.py --check`, so a version bumped in
 one file and missed in another fails CI instead of shipping a mislabelled
 installer.
+
+The same job also reads the release path itself. `python
+scripts/manifest_keys.py --check` holds the key roll to the rules an installed
+copy applies to it, and
+[`scripts/verify_workflow.py`](scripts/verify_workflow.py) reads the release job's
+steps and refuses a workflow that could make a release visible before its
+manifest was signed — a draft instead of a published release, a signing step
+moved after the publishing one, a publishing step that no longer checks what it
+is about to reveal, or another job asking the action for a release of its own.
+That check exists because nothing else can make it: the `verify-release` job runs
+once the release is public and passes either way, so a step moved in a pull
+request would be invisible until a copy asked the endpoint at exactly the wrong
+moment.
+
+The same job also runs the release flow itself, on a repository made for it.
+`release.py` cuts a release of *this* project, so it can never be exercised on
+this checkout; [`scripts/test_release.py`](scripts/test_release.py) copies the
+real `src-tauri/` and `scripts/` into a temporary repository with a bare remote
+to push to, and there checks every refusal the flow is supposed to make, what
+`--dry-run` leaves alone, and a full release end to end — the four copies of the
+version, the changelog section, the files the commit carries, the annotated tag
+and the push. The scripts are copied rather than reimplemented, so what runs is
+the code in this checkout, and the test fails if this repository's `HEAD` or
+`git status` moved while it ran.
 
 Rust is not the only thing with a formatting rule. `.editorconfig` sets UTF-8,
 LF and a four-space indent — two for the front end, configuration, Markdown and
@@ -373,11 +509,54 @@ Two things that are deliberately absent:
 **`release`** runs only for a `v*` tag and is the one job that writes to the
 repository. It checks that the tag names the version in the manifest, builds the
 portable executable and the installer, and has `tauri-action` create the GitHub
-Release with both attached — body from `scripts/release_notes.py`, with GitHub's
-own generated notes appended. Alongside them it uploads the two files the
-updater reads, `latest.json` and the installer's `.sig`, both built from the same
-signed build. The `installer` job skips tag pushes, so a tag is built once
-rather than twice.
+Release as a **draft**, with both attached — body from `scripts/release_notes.py`,
+with GitHub's own generated notes appended. Alongside them it uploads the two
+files the updater reads, `latest.json` and the installer's `.sig`, both built
+from the same signed build. The `installer` job skips tag pushes, so a tag is
+built once rather than twice.
+
+A draft is invisible to the endpoint the app asks, which is what makes the
+signing step safe to run after the build rather than inside it. Two steps follow,
+because `tauri-action` cannot sign the manifest it writes:
+
+- the first downloads `latest.json` from the draft, writes the repository's key
+  roll into it, signs it with the version `bump_version.py --print` reports, and
+  uploads `latest.json.sig` beside it. That is the signature an installed copy
+  checks before it believes a word of the manifest ([Updates](#updates)), so this
+  failing means the release cannot update anybody — and since the release is
+  still a draft, it also means nobody is offered it. This is the one place in
+  this workflow that installs the Tauri CLI itself: the CLI ships as a prebuilt
+  npm binary, and `tauri-action` installs it the same way on this runner, but
+  doing it explicitly means the step does not depend on what that action left
+  behind;
+- the second reads `latest.json` and `latest.json.sig` back out of the draft,
+  runs [`scripts/verify_release.py`](scripts/verify_release.py) over them with
+  `--signature-only` — the manifest's version, the signature over its bytes, and
+  the key roll it carries, with nothing downloaded, because a draft's assets are
+  not public — and only then publishes the release as the latest one. The check
+  is there rather than in the `verify-release` job below because it is the last
+  thing that happens before the manifest becomes reachable: everything a copy
+  can see, from the first moment it can see anything, has been checked.
+
+**`verify-release`** runs after `release`, and only when it succeeded: publishing
+the files and being updateable from them are different questions.
+[`scripts/verify_release.py`](scripts/verify_release.py) fetches `latest.json`
+and the signature published beside it from the endpoint the app uses, checks
+that it announces the version being verified, verifies that signature over the
+manifest's own bytes, and then downloads the installer the manifest points at
+and verifies its signature too — for each of them the key id, the signature, the
+global signature over the trusted comment and the version that comment records,
+which are the checks the app itself makes. Every asset the workflow publishes is
+checked, not only the ones an update passes through: the `.sig` published beside
+the installer has to be the signature the manifest embeds, since that embedded
+copy is the one an installed app verifies, and the portable executable has to be
+the release that is being verified, read out of its own version resource —
+nothing signs it, so a portable build left behind by an earlier release is
+otherwise invisible. A manifest that is missing, that is unsigned, that still
+belongs to an older release, that carries an installer whose bytes do not match
+its signature, or a portable build from another release, fails the run for that
+tag. It needs no token: the assets of a published release are public, and the key
+it verifies against is committed in this repository.
 
 ## Releasing
 
@@ -388,44 +567,66 @@ when all four agree. Neither build script holds a version literal, so a stale
 copy cannot silently mislabel an installer.
 
 ```bash
+python scripts/release.py 0.2.0 --dry-run    # say what it would do
+python scripts/release.py 0.2.0              # do it
+```
+
+That is the whole sequence in one command: bump every copy, move the
+`Unreleased` entries in [CHANGELOG.md](CHANGELOG.md) into a dated section,
+commit them, tag the commit and push both. The pushes come last, so nothing
+leaves the machine until every check has passed, and everything before them is
+local and reversible. A failure after them — a rejected tag push, say — is
+reported with the one command that finishes the job. It refuses to start unless:
+
+- the branch is in step with its upstream and the tree is clean — a release
+  commit carries the version and nothing else;
+- the new version is a semantic version ahead of the current one, with no such
+  tag locally or on the remote;
+- the `Unreleased` section has entries to move, and no section for the version
+  is there already.
+
+Before pushing it prints the notes the release page will carry, read from the
+commit it just tagged, so they can be read before they are published rather than
+after. `--dry-run` stops before anything is written.
+
+Every push runs the same sequence in a throwaway repository:
+[`scripts/test_release.py`](scripts/test_release.py) is what makes the refusals
+above and the release itself checked behaviour rather than a description of one.
+
+The three pieces are still usable on their own:
+
+```bash
 python scripts/bump_version.py --check      # do the copies agree?
 python scripts/bump_version.py 0.2.0        # write every copy at once
+python scripts/release_notes.py             # the notes, without releasing
 ```
 
 `--check` fails on a hardcoded version in either build script, and
 `--check --tag v0.2.0` fails when a tag does not name the version in the
 manifest — a release tag has to match the build it points at. After a bump,
 `cargo metadata --manifest-path src-tauri/Cargo.toml --locked` should succeed;
-it fails if the lock was left behind.
+it fails if the lock was left behind. `release_notes.py` prints the changelog
+entry followed by every commit since the previous tag, straight from `git log`,
+so the notes cannot drift from the repository. The release job runs both of
+these — the tag check and the notes — which is why `release.py` runs them on the
+commit it is about to push, and prints the notes it built rather than promising
+they will be right.
 
-The `TAURI_SIGNING_PRIVATE_KEY` repository secret has to hold the private half
-of the key in `tauri.conf.json` ([Updates](#updates) describes the pair). Without
-it the release job fails rather than publishing an installer no installed copy
-of the app would accept.
+**Let the tag publish it.** Pushing the tag starts the `release` job above,
+which refuses to publish if the tag and the manifest disagree. The
+`TAURI_SIGNING_PRIVATE_KEY` repository secret has to hold the private half of the
+key in `tauri.conf.json` ([Updates](#updates) describes the pair). Without it the
+release job fails rather than publishing an installer no installed copy of the
+app would accept — and because the build fails before the release is created,
+nothing is half-published: add the secret and use **Re-run failed jobs** on that
+run, which needs no new commit or tag.
 
-Then, in order:
-
-1. **Move the `Unreleased` entries** in [CHANGELOG.md](CHANGELOG.md) into a new
-   `## [0.2.0] - YYYY-MM-DD` section.
-2. **Read the notes before tagging them**, because they are what the release
-   page shows:
-
-   ```bash
-   python scripts/release_notes.py          # the version in the manifest
-   ```
-
-   That prints the changelog entry followed by every commit since the previous
-   tag, straight from `git log`, so the notes cannot drift from the repository.
-3. **Commit and tag**:
-
-   ```bash
-   git commit -a -m "Release ExcelScry 0.2.0"
-   git tag -a v0.2.0 -m "ExcelScry 0.2.0"
-   git push origin main --follow-tags
-   ```
-
-4. **Let the tag publish it.** Pushing the tag starts the `release` job above,
-   which refuses to publish if the tag and the manifest disagree.
+Once the release is published, the `verify-release` job checks what an installed
+copy would get from it. If that fails, what is wrong is the release rather than
+the check, and the release page is what every installed copy reads: republish
+the assets, or remove the release, before anything updates from it. Nothing in
+this script can do that for you — it stops at the push, and the push is what
+starts all of it.
 
 ## Limitations
 
@@ -445,6 +646,7 @@ Then, in order:
 - **Updates only exist from the first release built by the workflow**, and only
   for a strictly newer version. Installed copies of an older, pre-updater
   release cannot update themselves; they have to be replaced by hand once.
-- The update check is a single request to the `releases/latest/download` URL
-  with no retry and no background polling: a machine that is offline at start-up
-  simply does not offer the update until the next launch or a manual check.
+- The update check is two requests to the `releases/latest/download` URL - the
+  manifest and its signature - with no retry and no background polling: a
+  machine that is offline at start-up simply does not offer the update until the
+  next launch or a manual check.

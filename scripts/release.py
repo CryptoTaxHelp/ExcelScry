@@ -299,9 +299,12 @@ def main() -> int:
     print("build fails rather than publishing an installer no copy of the app would")
     print("accept. See 'Updates' in README.md.")
     print()
-    print("When it has published, the `verify-release` job asks the endpoint the app")
-    print("asks and checks the installer's signature against the key in the app, so a")
-    print("release no installed copy could update from fails its own run.")
+    print("The release stays a draft until its manifest is signed and the signature")
+    print("has been checked back out of it, so no copy is ever offered an unsigned")
+    print("manifest. When it has published, the `verify-release` job asks the")
+    print("endpoint the app asks and checks the installer's signature against the key")
+    print("in the app, so a release no installed copy could update from fails its own")
+    print("run.")
     return 0
 
 

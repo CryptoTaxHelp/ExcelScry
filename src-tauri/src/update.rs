@@ -1,29 +1,39 @@
 //! Updating from the GitHub release this build came from.
 //!
-//! The release manifest is the `latest.json` asset `tauri-action` attaches to
-//! every release built by the workflow; the app asks for it at
-//! `.../releases/latest/download/latest.json`, which always resolves to the
-//! most recent published release.
+//! The release manifest is the `latest.json` asset the release job attaches to
+//! every release; the app asks for it at
+//! `.../releases/latest/download/latest.json`, which always resolves to the most
+//! recent published release.
 //!
-//! The downloaded installer is verified against the public key in
-//! `tauri.conf.json` before it is allowed to run. That key is the half that
-//! matters here: anyone can replace an asset in a repository they can push to,
-//! but only the holder of the private key can produce an installer this app
-//! will accept.
+//! Two signatures stand between an answer from the network and a new version
+//! being installed, and both are checked against a key this build trusts - the
+//! public key in `tauri.conf.json`, and any key a signed manifest has handed
+//! over since:
 //!
-//! `requireSignedVersion` is on, so the artifact also has to have been signed
-//! *for the version the manifest announced*. The manifest itself is not signed -
-//! it arrives over TLS from a release anyone with push access could rewrite - so
-//! without that check a crafted manifest could pair a new version number with
-//! the signature and URL of an older, genuinely signed release and talk the app
-//! into reinstalling it. `tauri build` stamps the version into the signature's
-//! trusted comment, and the release job refuses a tag that disagrees with the
-//! manifests, so the two numbers agree on every release this app can update
-//! from.
+//! * the manifest itself, by [`crate::manifest`], before anything it says is
+//!   believed. TLS says the bytes came from GitHub; only that signature says
+//!   they are the bytes this project published;
+//! * the installer it points at, by the updater, while it is downloaded, with
+//!   whichever of those keys signed it. A release that replaces the signing key
+//!   can therefore hand the new key over and sign its installer with it, which
+//!   is what makes a rotation something an installed copy carries out on its
+//!   own.
+//!
+//! `requireSignedVersion` is on, so the installer also has to have been signed
+//! *for the version the manifest announced*. A signature over an installer only
+//! covers the installer, so without that check a rewritten manifest could pair a
+//! new version number with the signature and URL of an older, genuinely signed
+//! release and talk the app into reinstalling it. `tauri build` stamps the
+//! version into the signature's trusted comment, the release job refuses a tag
+//! that disagrees with the manifests, and the manifest is signed for the version
+//! it announces - so all three numbers agree on every release this app can
+//! update from.
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 use tauri_plugin_updater::UpdaterExt;
+
+use crate::manifest;
 
 /// An update the release manifest announced.
 #[derive(Debug, Serialize)]
@@ -42,6 +52,19 @@ pub struct UpdateProgress {
     pub downloaded: u64,
     /// `None` when the server sends no content length.
     pub total: Option<u64>,
+}
+
+/// An updater that checks a download against the key the release named, or -
+/// when the manifest names none this build trusts, or none at all - the key this
+/// build ships with, which is what the updater would have used on its own.
+fn updater_for(
+    app: &AppHandle,
+    installer_key: Option<String>,
+) -> Result<tauri_plugin_updater::Updater, tauri_plugin_updater::Error> {
+    match installer_key {
+        Some(key) => app.updater_builder().pubkey(key).build(),
+        None => app.updater(),
+    }
 }
 
 /// Turn an updater failure into something worth putting in a status bar.
@@ -79,13 +102,25 @@ pub fn app_version(app: AppHandle) -> String {
 
 /// Ask the release manifest whether a newer version exists.
 ///
+/// The manifest is fetched here rather than by the updater, so that the
+/// signature published beside it can be checked first; `restore_update` then
+/// applies the updater's own target selection and version comparison to the
+/// document that was verified. It has always required an installer's signature
+/// to bind the announced version, which is safe to insist on because the
+/// announced version is now one this build checked.
+///
 /// `Ok(None)` is the ordinary "already current" answer. An error means the
 /// question could not be asked at all - no network, no release yet, endpoint
-/// unreachable - which the UI reports without treating it as a failure.
+/// unreachable, or a manifest nothing signed - which the UI reports without
+/// treating it as a failure.
 #[tauri::command]
 pub async fn check_for_update(app: AppHandle) -> Result<Option<UpdateInfo>, String> {
-    let updater = app.updater().map_err(describe)?;
-    match updater.check().await.map_err(describe)? {
+    let verified = manifest::fetch(&app).await?;
+    let updater = updater_for(&app, verified.installer_key()).map_err(describe)?;
+    match updater
+        .restore_update(verified.into_document())
+        .map_err(describe)?
+    {
         Some(update) => Ok(Some(UpdateInfo {
             version: update.version.clone(),
             current_version: update.current_version.clone(),
@@ -97,9 +132,15 @@ pub async fn check_for_update(app: AppHandle) -> Result<Option<UpdateInfo>, Stri
 
 /// Download the announced update, verify it, and hand it to its installer.
 ///
-/// The bytes are checked against the configured public key during the
-/// download, so a package that does not match is never run - the installer is
-/// only reached once the signature holds.
+/// The document is fetched and verified again rather than reused from the check
+/// that offered the update, so an install follows a manifest that was verified
+/// in this run: the offer and the install are separate invocations of the app,
+/// and only the second one installs anything.
+///
+/// The installer's bytes are checked during the download against the key the
+/// release names for this platform - the one this build ships with, or one the
+/// same manifest handed over - so a package that does not match is never run:
+/// the installer is only reached once that signature holds too.
 ///
 /// On Windows the installer is then launched and takes over: it closes this
 /// app, replaces it, and starts it again (`restart_after_install` defaults to
@@ -108,10 +149,10 @@ pub async fn check_for_update(app: AppHandle) -> Result<Option<UpdateInfo>, Stri
 /// own would only race it.
 #[tauri::command]
 pub async fn install_update(app: AppHandle) -> Result<(), String> {
-    let updater = app.updater().map_err(describe)?;
+    let verified = manifest::fetch(&app).await?;
+    let updater = updater_for(&app, verified.installer_key()).map_err(describe)?;
     let update = updater
-        .check()
-        .await
+        .restore_update(verified.into_document())
         .map_err(describe)?
         .ok_or("There is no update to install.")?;
 

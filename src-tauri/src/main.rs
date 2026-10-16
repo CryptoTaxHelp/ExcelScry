@@ -3,6 +3,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod associations;
+mod manifest;
 mod model;
 mod ods_export;
 mod trust;
@@ -226,6 +227,85 @@ fn reveal_in_explorer(path: String) -> Result<(), String> {
     launch_detached("explorer.exe", &[&format!("/select,{}", p.display())])
 }
 
+/// Open a link from the release notes in the user's own browser.
+///
+/// This is the one command whose argument comes from outside this build, and it
+/// is the reason the checks are written out rather than assumed: the notes are
+/// the release body, so a link in them is data, not an instruction.
+///
+/// Two things keep that from mattering. Only `http` and `https` are accepted, so
+/// `javascript:`, `data:` and `file:` are refused rather than handed to Windows.
+/// And the address goes to the shell's own "open this" call rather than to a
+/// command interpreter: `cmd /C start`, which this app uses for its own
+/// `ms-settings:` URI, would run the `&` in a URL as a second command.
+///
+/// The webview never navigates: the click is handled in the front end, which is
+/// what puts the page in the browser instead of replacing the app with it.
+#[tauri::command]
+fn open_link(url: String) -> Result<(), String> {
+    let target = web_link(&url).ok_or("That is not a link this app will open.")?;
+    open_in_browser(target)
+}
+
+/// The address, if it is a web link this app will hand to Windows.
+fn web_link(url: &str) -> Option<&str> {
+    let trimmed = url.trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    let rest = lowered
+        .strip_prefix("https://")
+        .or_else(|| lowered.strip_prefix("http://"))?;
+    // A host has to be there: `https:///x` is not something to hand to the
+    // shell. A control character would be a way to slip past something that
+    // splits on lines; there is no such parser here, but a URL with one is not
+    // a URL.
+    if rest.is_empty() || rest.starts_with('/') || rest.chars().any(char::is_control) {
+        return None;
+    }
+    Some(trimmed)
+}
+
+/// Hand the address to the shell, which opens it with whatever handles it.
+#[cfg(windows)]
+fn open_in_browser(url: &str) -> Result<(), String> {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    fn wide(text: &str) -> Vec<u16> {
+        text.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    let operation = wide("open");
+    let target = wide(url);
+    // SAFETY: both strings are NUL-terminated and outlive the call (`wide`
+    // returns owned buffers, kept alive by these bindings), the null window
+    // handle means "no parent window", and the two `null` pointers are the
+    // optional parameters, which ShellExecuteW documents as acceptable.
+    let launched = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            operation.as_ptr(),
+            target.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    // ShellExecuteW returns a value of 32 or less when it could not start
+    // anything; above that it is a handle to what it started.
+    if launched as isize <= 32 {
+        Err(format!("Windows could not open {url}."))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+fn open_in_browser(url: &str) -> Result<(), String> {
+    Err(format!(
+        "Opening {url} in a browser is not wired up on this platform."
+    ))
+}
+
 /// Launch a helper process with no console window and without waiting.
 fn launch_detached(program: &str, args: &[&str]) -> Result<(), String> {
     let mut command = std::process::Command::new(program);
@@ -288,6 +368,7 @@ fn main() {
             install_associations,
             remove_associations,
             open_default_apps_settings,
+            open_link,
             reveal_in_explorer,
             update::app_version,
             update::check_for_update,
@@ -333,6 +414,43 @@ mod tests {
             ensure_extension(PathBuf::from("C:\\out\\book.xlsx"), "ods"),
             PathBuf::from("C:\\out\\book.xlsx.ods")
         );
+    }
+
+    #[test]
+    fn web_links_are_the_two_schemes_a_browser_is_for() {
+        assert_eq!(
+            web_link("https://example.com/x"),
+            Some("https://example.com/x")
+        );
+        assert_eq!(
+            web_link("  http://example.com  "),
+            Some("http://example.com")
+        );
+        // The scheme is matched however the release's author spelled it.
+        assert_eq!(
+            web_link("HTTPS://EXAMPLE.COM/a?b=1"),
+            Some("HTTPS://EXAMPLE.COM/a?b=1")
+        );
+    }
+
+    #[test]
+    fn anything_that_is_not_a_web_link_is_refused() {
+        for url in [
+            "javascript:alert(1)",
+            "data:text/html,<b>",
+            "file:///C:/Windows/System32/calc.exe",
+            "ms-settings:defaultapps",
+            "vbscript:msgbox",
+            "//example.com",
+            "https://",
+            "https:///no-host",
+            "",
+        ] {
+            assert_eq!(web_link(url), None, "{url} should not be opened");
+        }
+        // A newline inside a URL is not a URL, and neither is a bare scheme.
+        assert_eq!(web_link("https://example.com/a\nb"), None);
+        assert_eq!(web_link("https://example.com/a\u{0}b"), None);
     }
 
     #[test]

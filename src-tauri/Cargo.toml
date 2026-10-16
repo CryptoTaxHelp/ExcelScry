@@ -28,13 +28,30 @@ zip = "8.6.0"
 # It is only needed to unpack a zipped updater payload (the legacy
 # `nsis.zip`/AppImage-tarball formats); this app publishes the NSIS setup.exe,
 # which the updater runs directly.
+# The update manifest is signed as well as the installer it points at, and the
+# app checks that signature itself before it believes anything the manifest
+# says. All four crates below are already in the tree through
+# tauri-plugin-updater - they are listed here because this crate now uses them
+# directly, and their versions and features match the plugin's so that the
+# compiled set of crates does not change.
 tauri-plugin-updater = { version = "2.14.0", default-features = false, features = ["rustls-tls", "system-proxy"] }
+# Verifying the signature over the manifest, and its public key.
+minisign-verify = "0.3"
+base64 = "0.22"
+# Fetching the manifest and its signature. The updater links rustls without a
+# provider and installs one on the way into its own first request; this crate
+# makes a request of its own, so it installs the same one.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "system-proxy"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56.0"
 tauri-plugin-single-instance = "2.5.4"
-# Only for SHChangeNotify, so Explorer refreshes its context menu immediately.
-windows-sys = { version = "0.61.2", features = ["Win32_UI_Shell"] }
+# For SHChangeNotify, so Explorer refreshes its context menu immediately, and
+# for ShellExecuteW, which opens a link from the release notes in the user's own
+# browser. (`Win32_UI_Shell` does not pull in the module `ShellExecuteW`'s
+# signature mentions, hence the second feature.)
+windows-sys = { version = "0.61.2", features = ["Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [profile.release]
 lto = "thin"

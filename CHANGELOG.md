@@ -11,19 +11,109 @@ those entries into a version section and tags the commit that holds it.
 
 ### Added
 
+- **The update manifest is signed, and the app checks it before believing it.**
+  A manifest that arrives over TLS proves only where the bytes came from, not
+  that they are the ones this project published, so the release job now signs
+  `latest.json` with the same key as the installers and publishes the signature
+  beside it as `latest.json.sig`. `src-tauri/src/manifest.rs` fetches both,
+  verifies the signature over the manifest's own bytes against the key in
+  `tauri.conf.json`, and only then hands the document to the updater
+  (`restore_update`) - so the version, the notes and the installer's URL are the
+  signed ones rather than whatever the endpoint said. A manifest with no
+  signature beside it, or one whose signature does not cover it, is refused
+  rather than installed. The app's tests include a manifest signed by the
+  project's own release key, and the four ways such a signature can fail.
 - **What's new, before it is installed.** The notes the release manifest carries
   — the same text the release page shows — are rendered in
-  **Settings › Updates** as headings, bullets and emphasis, so an update can be
-  read inside the app before anything is downloaded. They arrive with the check
-  that already ran; nothing extra is fetched. The notes are Markdown rather than
-  HTML, so they are built out of elements and text nodes: a note containing
-  markup shows the characters, not the markup.
+  **Settings › Updates** as headings, bullets, emphasis and links, so an update
+  can be read inside the app before anything is downloaded. They arrive with the
+  check that already ran; nothing extra is fetched. The notes are Markdown rather
+  than HTML, so they are built out of elements and text nodes: a note containing
+  markup shows the characters, not the markup. A link is the exception, and the
+  one thing a release body may ask the app to *do*: only `http` and `https` are
+  links at all, and clicking one opens it in the default browser rather than
+  replacing the app with it.
+- **A published release is checked before anyone updates from it.** The
+  `verify-release` job runs after the release job and asks the endpoint the app
+  asks - `latest.json`, fetched from `tauri.conf.json` - verifying the signature
+  published beside it over the manifest's own bytes, then downloading the
+  installer the manifest points at and verifying its signature against the
+  public key in that same file. Both are checked by the rules the app applies:
+  the key id, the signature, the global signature over the trusted comment, and
+  the version that comment records. Every other asset the workflow publishes is
+  checked in the same run: the `.sig` published beside the installer has to be
+  the signature the manifest embeds, and the portable executable has to be the
+  release being verified, read out of its own version resource - nothing signs
+  it, so a portable build left behind by an earlier release is otherwise
+  invisible. A manifest that is missing, that is unsigned, that still belongs to
+  an older release, that carries an installer whose bytes do not match its
+  signature, or a portable build from another release fails the run for that tag
+  instead of a user's update check.
+- **A release can hand the app a new updater key, and retire one.** The signing
+  key can be replaced - because it is due for replacement, or because it has
+  leaked - without a release that every installed copy has to take first. The
+  manifest may carry a `keys` roll: keys to start accepting, and keys to retire.
+  The app takes it only from a manifest whose signature has already been checked,
+  and merges it into a record kept beside its own per-user data
+  (`%LOCALAPPDATA%\com.excelscry.viewer\updater-keys.json`), so a retirement
+  survives a restart, applies to the key the build itself ships with, and cannot
+  be undone by an older manifest. A roll that names something that is not a key,
+  or that would leave nothing trusted, is refused whole - the release carrying it
+  would otherwise be the last one those copies could update from. The installer
+  is verified with whichever trusted key the release names for it, so the release
+  doing the rotation can sign its installer with the new key. The roll lives in
+  `src-tauri/updater-keys.json`, is written into `latest.json` by
+  `scripts/manifest_keys.py` before the release job signs it, and is checked
+  against that same file on every push and again against the published release.
 - **A release is one command.** `python scripts/release.py 0.2.0` bumps the four
   copies of the version, moves the `Unreleased` entries into a dated section,
   commits, tags and pushes — and refuses to start unless the tree is clean, the
   branch is in step with its upstream, the version is ahead of the current one
   and there are entries to release. It prints the notes the release page will
   carry before pushing, and `--dry-run` stops before anything is written.
+- **The release flow is checked, not described.** `release.py` cuts a release of
+  this repository, so nothing in CI could run it, and what it refuses was only
+  ever asserted in prose. `scripts/test_release.py` runs it somewhere it is safe
+  to: a temporary checkout of the real `src-tauri/` and `scripts/`, with a
+  changelog holding unreleased entries and a bare remote to push to, in which
+  every refusal the flow is supposed to make is checked — an uncommitted change,
+  a branch ahead of or behind its remote, a version that is not ahead, a version
+  that is not a version, a tag that already exists, a changelog with nothing
+  unreleased, one that already names the version — along with what `--dry-run`
+  leaves alone, and a full release end to end: the four copies of the version,
+  the moved changelog section, the files the release commit carries, the
+  annotated tag, both pushes, and the report a rejected tag push leaves behind.
+  The scripts are copied rather than reimplemented, so the code under test is
+  the code in the checkout, and the run fails if this repository's `HEAD` or
+  `git status` moved while it was going.
+
+### Changed
+
+- **A release is published only once its manifest is signed, and the workflow
+  cannot publish one that is not.** The release job
+  builds the release as a draft, and makes it visible in its last step: the
+  endpoint the app asks resolves to the latest release that is neither a draft
+  nor a pre-release, so while the manifest is being signed that endpoint still
+  answers with the previous release's signed manifest. Everything the release
+  will serve is attached to the draft first - the installer, its signature,
+  `latest.json` with the key roll in it, and `latest.json.sig` - and the two
+  manifest files are then read back out of the draft and checked
+  ([`verify_release.py --signature-only`](scripts/verify_release.py)) before
+  publishing. A release job that fails anywhere before that leaves a draft no
+  copy can see, rather than a public release with an unsigned manifest that no
+  copy can update from. Since nothing that runs *after* publication can tell
+  whether the manifest was briefly unsigned, the ordering itself is checked on
+  every push by [`scripts/verify_workflow.py`](scripts/verify_workflow.py): read
+  the release job, and refuse a workflow that would build a published release
+  rather than a draft, sign the manifest after publishing it, publish without
+  checking what is about to become visible, or let another job create a release
+  of its own.
+- **Installing asks first.** The status-bar pill and the **Settings › Updates**
+  button used to install on a single click; both now open a confirmation showing
+  what is new in the version on offer - the release's own opening points, a few
+  at a time - along with what installing does. Nothing is downloaded until that
+  is answered, cancelling costs nothing, and the full notes are a click away in
+  **Settings › Updates**.
 
 ## [0.1.1] - 2026-10-16
 

@@ -97,6 +97,11 @@ const els = {
   releaseNotes: document.getElementById("release-notes"),
   releaseNotesTitle: document.getElementById("release-notes-title"),
   releaseNotesBody: document.getElementById("release-notes-body"),
+  updateConfirm: document.getElementById("update-confirm"),
+  updateSummarySection: document.getElementById("update-summary-section"),
+  updateSummaryTitle: document.getElementById("update-summary-title"),
+  updateSummary: document.getElementById("update-summary"),
+  updateSummaryMore: document.getElementById("update-summary-more"),
   btnCheckUpdates: document.getElementById("btn-check-updates"),
   btnInstallUpdate: document.getElementById("btn-install-update"),
   trust: document.getElementById("trust"),
@@ -801,6 +806,8 @@ function renderUpdateFacts() {
   }
   if (els.btnInstallUpdate) els.btnInstallUpdate.hidden = !state.update;
   renderReleaseNotes(state.update);
+  // A check that came back with nothing must not leave a confirmation standing.
+  if (!state.update) closeUpdateConfirm();
 }
 
 /** How much of the notes to render. The rest is on the release page. */
@@ -815,7 +822,8 @@ const NOTES_LIMIT = 8000;
  * created with `createElement` or `createTextNode`, never `innerHTML`, which
  * means a note containing markup renders as the characters someone typed. Only
  * the shapes this project's own release notes use are understood - headings,
- * bullets, `**bold**` and `` `code` `` - and anything else stays literal.
+ * bullets, `**bold**`, `` `code` ``, links - and anything else stays literal.
+ * Headings are text throughout: a heading is a label, not a place to land.
  */
 function renderReleaseNotes(update) {
   if (!els.releaseNotes) return;
@@ -861,11 +869,21 @@ function renderReleaseNotes(update) {
   }
 }
 
-/** Add one line of note text, marking up only `**bold**` and `` `code` ``. */
+/**
+ * The Markdown shapes a line of notes may carry: a link, an autolink, `**bold**`
+ * and `` `code` ``. Everything else is text, which is the point.
+ */
+const NOTE_MARKUP = /(\[[^\]\n]+\]\([^()\s]+\)|<https?:\/\/[^\s>]+>|\*\*[^*\n]+\*\*|`[^`\n]+`)/g;
+
+/** Add one line of note text, marking up the shapes above and nothing else. */
 function appendNoteText(text, parent) {
-  for (const part of text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g)) {
+  for (const part of text.split(NOTE_MARKUP)) {
     if (!part) continue;
-    if (part.startsWith("**") && part.endsWith("**") && part.length > 4) {
+    const link = /^\[([^\]\n]+)\]\(([^()\s]+)\)$/.exec(part) ||
+      /^<(https?:\/\/[^\s>]+)>$/.exec(part);
+    if (link) {
+      appendNoteLink(link[1], link[2] || link[1], part, parent);
+    } else if (part.startsWith("**") && part.endsWith("**") && part.length > 4) {
       const strong = document.createElement("strong");
       strong.textContent = part.slice(2, -2);
       parent.append(strong);
@@ -879,6 +897,108 @@ function appendNoteText(text, parent) {
   }
 }
 
+/**
+ * The address, if it is one this app will open; otherwise nothing.
+ *
+ * A release body is not this project's own text, so a link in one is a claim
+ * rather than an instruction. Only the two schemes a browser is for are links:
+ * `javascript:`, `data:` and `file:` stay the characters someone typed. The URL
+ * parser settles the rest - what it produces is an absolute address, or nothing.
+ */
+function webLink(url) {
+  const text = String(url || "").trim();
+  try {
+    const parsed = new URL(text);
+    return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed.href : "";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * One link from the notes, opened in the user's own browser.
+ *
+ * Clicking is handled here rather than left to the browser the webview is: an
+ * unhandled link would replace ExcelScry with a web page. The address is handed
+ * to the Rust side, which checks it again and opens it with the shell; the
+ * `href` is what the status bar shows and what makes this a link to the
+ * keyboard, not a route out of the app.
+ */
+function appendNoteLink(label, url, source, parent) {
+  const target = webLink(url);
+  if (!target) {
+    // Refused links are exactly the characters someone wrote, brackets and all.
+    parent.append(document.createTextNode(source));
+    return;
+  }
+  const anchor = document.createElement("a");
+  anchor.className = "note-link";
+  anchor.href = target;
+  anchor.title = target;
+  anchor.rel = "noreferrer";
+  anchor.textContent = label === url ? target : label;
+  const open = (event) => {
+    event.preventDefault();
+    invoke("open_link", { url: target }).catch((err) => flash(String(err), true));
+  };
+  anchor.addEventListener("click", open);
+  // Middle-click asks for a second window by default; there is no second window
+  // in this app, so it opens in the browser like any other click.
+  anchor.addEventListener("auxclick", open);
+  parent.append(anchor);
+}
+
+/** How many of the release's own points the confirmation shows. */
+const SUMMARY_POINTS = 3;
+
+/** The longest a single summary line may run before it is cut. */
+const SUMMARY_WIDTH = 160;
+
+/**
+ * The release's notes, cut down to the few lines the confirmation shows.
+ *
+ * The notes are the changelog entry followed by the commit list, and the commit
+ * list says nothing about what an update is for, so the summary stops where the
+ * notes start listing commits. Each point is the bullet's own opening - a
+ * changelog entry leads with its conclusion in bold - so what the confirmation
+ * shows is the release's words rather than anyone's paraphrase of them.
+ */
+function noteSummary(notes) {
+  const points = [];
+  let remainder = 0;
+  let listing = false;
+  for (const raw of String(notes || "").split(/\r?\n/)) {
+    const line = raw.trim();
+    if (/^#{1,6}\s/.test(line)) {
+      listing = /^#{1,6}\s+Commits\b/i.test(line);
+      continue;
+    }
+    const bullet = /^[-*]\s+(.*)$/.exec(line);
+    if (!bullet || listing) continue;
+    if (points.length < SUMMARY_POINTS) points.push(summarisePoint(bullet[1]));
+    else remainder += 1;
+  }
+  return { points, remainder };
+}
+
+/**
+ * One bullet's opening: its bold conclusion, or its first sentence.
+ *
+ * A summary line is cut at [`SUMMARY_WIDTH`], which would land in the middle of
+ * a URL, so a link here is its label: the full notes, with links that work, are
+ * one click away in **Settings › Updates**.
+ */
+function summarisePoint(text) {
+  const plain = text
+    .replace(/\[([^\]\n]+)\]\([^()\s]+\)/g, "$1")
+    .replace(/<(https?:\/\/[^\s>]+)>/g, "$1");
+  const lead = /^\*\*([^*]+)\*\*/.exec(plain);
+  if (lead && /[.!?]$/.test(lead[1].trim())) return `**${lead[1].trim()}**`;
+  const sentence = /^(.+?[.!?])(\s|$)/.exec(plain);
+  const line = (sentence ? sentence[1] : plain).trim();
+  return line.length > SUMMARY_WIDTH ? `${line.slice(0, SUMMARY_WIDTH - 1).trimEnd()}…` : line;
+}
+
 /** The status-bar pill, which exists only while there is something to install. */
 function renderUpdatePill() {
   const info = state.update;
@@ -886,8 +1006,8 @@ function renderUpdatePill() {
   if (!info) return;
   els.updatePillText.textContent = `Update to ${info.version}`;
   els.updatePill.title = state.version
-    ? `ExcelScry ${state.version} → ${info.version} — click to download and install`
-    : `ExcelScry ${info.version} is available — click to download and install`;
+    ? `ExcelScry ${state.version} → ${info.version} — click for what's new, then install`
+    : `ExcelScry ${info.version} is available — click for what's new, then install`;
 }
 
 /**
@@ -926,6 +1046,42 @@ async function checkForUpdate({ silent = false } = {}) {
 }
 
 /**
+ * Ask before installing, which is all the pill and the Settings button do now.
+ *
+ * An update closes the app, replaces it and starts it again, and the release's
+ * own notes are the thing worth reading before that happens - so the click asks
+ * first, showing the release's opening points rather than a paraphrase of them.
+ * Nothing is downloaded until the question is answered.
+ */
+function requestUpdate() {
+  if (!state.update || state.updating || !els.updateConfirm.hidden) return;
+  const version = state.update.version;
+  const { points, remainder } = noteSummary(state.update.notes);
+
+  els.updateSummaryTitle.textContent = `What's new in ${version}`;
+  els.updateSummary.replaceChildren();
+  for (const point of points) {
+    const item = document.createElement("li");
+    appendNoteText(point, item);
+    els.updateSummary.append(item);
+  }
+  els.updateSummarySection.hidden = !points.length;
+  els.updateSummaryMore.textContent = remainder
+    ? `…and ${remainder} more in Settings › Updates.`
+    : "The full notes are in Settings › Updates.";
+
+  document.getElementById("update-confirm-title").textContent = `Install ExcelScry ${version}?`;
+  els.updateConfirm.hidden = false;
+  // Focus lands on the button that changes nothing: installing takes a
+  // deliberate second click, not the Enter key that opened this.
+  document.getElementById("btn-update-cancel").focus();
+}
+
+function closeUpdateConfirm() {
+  els.updateConfirm.hidden = true;
+}
+
+/**
  * Download, verify and install, then let the installer take over: on Windows
  * it closes this app and starts the new version itself.
  */
@@ -960,9 +1116,18 @@ function initEvents() {
   });
   els.btnSettings.addEventListener("click", openSettings);
 
-  els.updatePill.addEventListener("click", installUpdate);
+  els.updatePill.addEventListener("click", requestUpdate);
   els.btnCheckUpdates.addEventListener("click", () => checkForUpdate());
-  els.btnInstallUpdate.addEventListener("click", installUpdate);
+  els.btnInstallUpdate.addEventListener("click", requestUpdate);
+  document.getElementById("btn-update-cancel").addEventListener("click", closeUpdateConfirm);
+  document.getElementById("btn-update-cancel-x").addEventListener("click", closeUpdateConfirm);
+  document.getElementById("btn-update-go").addEventListener("click", () => {
+    closeUpdateConfirm();
+    installUpdate();
+  });
+  els.updateConfirm.addEventListener("click", (event) => {
+    if (event.target.dataset.close) closeUpdateConfirm();
+  });
   listen("update-progress", (event) => {
     const progress = event.payload || {};
     const version = state.update ? state.update.version : "the update";
@@ -1041,6 +1206,7 @@ function initEvents() {
 
 function onKeyDown(event) {
   if (event.key === "Escape") {
+    closeUpdateConfirm();
     closeSettings();
     closeTrust();
     return;

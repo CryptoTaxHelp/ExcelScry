@@ -58,6 +58,36 @@ jobs:
       - name: Check that the version copies agree
         run: python scripts/bump_version.py --check
 
+      # The key roll a release publishes is decided by
+      # `src-tauri/updater-keys.json`. It is written into the manifest by the
+      # release job, after this, so a roll no installed copy could carry out is
+      # caught here - on a pull request - rather than on a tag.
+      - name: Check that the updater key roll can be carried out
+        run: python scripts/manifest_keys.py --check
+
+      # `release.py` cuts a release of *this* repository, so it can never be
+      # exercised on this one. The test runs it in a throwaway repository
+      # instead - the real `src-tauri/` and `scripts/` copied in, a changelog
+      # with something in `Unreleased`, and a bare remote to push to - and
+      # checks every refusal the flow is supposed to make, and the release it is
+      # supposed to make. What runs is the code in this checkout, so a change
+      # that breaks the release flow fails here rather than on a tag.
+      - name: Check that the release flow does what it says it does
+        run: python scripts/test_release.py
+
+      # A release has to be invisible until its manifest is signed, which the
+      # release job does by building a draft and publishing it last - after the
+      # signature has been read back out and checked. That is an ordering in a
+      # file this job never runs, and the release job's own verification passes
+      # whether or not a step was moved, so the ordering is read out here on
+      # every push instead. PyYAML is not part of the runner's Python, so it is
+      # installed rather than assumed: a check that quietly skipped itself would
+      # be worse than none.
+      - name: Check that no release can be published before its manifest is signed
+        run: |
+          python -m pip install --quiet pyyaml
+          python scripts/verify_workflow.py
+
   # The portable executable and the NSIS installer, built the same way
   # scripts/build.sh builds them locally. No tagName/releaseId is passed, so
   # nothing is published; the bundles are uploaded as a workflow artifact.
@@ -100,9 +130,11 @@ jobs:
           uploadUpdaterJson: false
           uploadUpdaterSignatures: false
 
-  # Pushing a v* tag publishes the release. This is the only job that writes to
-  # the repository, and it refuses to publish a tag that disagrees with the
-  # manifests, so a mislabelled release cannot get out.
+  # Pushing a v* tag builds the release, and publishes it once its manifest is
+  # signed: everything is attached while the release is a draft, and the last
+  # step makes it visible. This is the only job that writes to the repository,
+  # and it refuses to publish a tag that disagrees with the manifests, so a
+  # mislabelled release cannot get out.
   release:
     name: Release
     if: ${{ startsWith(github.ref, 'refs/tags/v') }}
@@ -138,7 +170,7 @@ jobs:
             echo "RELEASE_NOTES_EOF"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Build and publish the release
+      - name: Build the release, as a draft
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -154,6 +186,16 @@ jobs:
           # generated notes appended after it.
           releaseBody: ${{ steps.notes.outputs.body }}
           generateReleaseNotes: true
+          # Nothing is served while the manifest is unsigned. The endpoint the
+          # app asks - `.../releases/latest/download/latest.json` - resolves to
+          # the latest release that is neither a draft nor a pre-release, so
+          # while this release is a draft that endpoint still answers with the
+          # previous release's signed manifest. The last step of this job
+          # publishes this one, once `latest.json.sig` is attached and checked,
+          # which is the first moment a copy can see any of it. A build that
+          # fails before then leaves a draft no copy can see, rather than a
+          # public release nobody could update from.
+          releaseDraft: true
           # Both deliverables reach the release page: the portable executable
           # and the NSIS installer.
           uploadPlainBinary: true
@@ -162,3 +204,95 @@ jobs:
           uploadUpdaterJson: true
           updaterJsonPreferNsis: true
           uploadUpdaterSignatures: true
+
+      # `tauri-action` cannot sign the manifest: it writes `latest.json` after
+      # the build, and what the app now checks is a signature over the manifest
+      # itself, so that the version the endpoint announces is signed rather than
+      # merely carried over TLS. So it is signed here, with the same key as the
+      # installers, and published beside the manifest as `latest.json.sig` -
+      # which is where the app looks for it, and where the key roll has to be by
+      # then too. An installed copy refuses a release whose manifest carries no
+      # signature, so this has to succeed for the release to be updateable at
+      # all; the `verify-release` job below checks the published result rather
+      # than trusting this step. It runs while the release is a draft, so a
+      # failure here leaves nothing public rather than an unsigned manifest at
+      # the endpoint.
+      - name: Sign the update manifest
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The same secret the build uses: the CLI reads the key from here.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          # The key was generated with no password, so this is normally empty.
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          mkdir -p updater-manifest
+          gh release download "${{ github.ref_name }}" --pattern latest.json --dir updater-manifest
+          # The Tauri CLI ships as a prebuilt npm binary, and tauri-action
+          # installs it on this runner the same way; installing it here as well
+          # means this step does not depend on what that action left behind.
+          npm install --global @tauri-apps/cli@v2
+          # The updater key roll goes in first: an installed copy takes a new
+          # key, and the retirement of an old one, from this manifest and
+          # nowhere else, so it has to be part of what the signature below
+          # covers. The roll is `src-tauri/updater-keys.json`, which the checks
+          # job has already held to the rules the app applies to one.
+          python scripts/manifest_keys.py updater-manifest/latest.json
+          # The version comes from the manifest, never a literal: it is the
+          # number the tag was checked against and the one `tauri build` stamps
+          # into the installers' signatures, so the three agree by construction.
+          tauri signer sign \
+            --app-version "$(python scripts/bump_version.py --print)" \
+            updater-manifest/latest.json
+          gh release upload "${{ github.ref_name }}" updater-manifest/latest.json.sig --clobber
+
+      # The release becomes visible here and nowhere else. Every asset it will
+      # serve is already attached - the installer, its signature, `latest.json`
+      # with the key roll in it, and `latest.json.sig` beside it - and the two
+      # manifest files are read back out of the draft and checked before the
+      # release is published, so what a copy can reach, from the first moment it
+      # can reach anything, is a manifest that is signed. The check stops before
+      # the artifacts: a draft's assets are not public, which is the point of
+      # publishing last, so `verify_release.py` is asked for the manifest alone.
+      - name: Publish the signed release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p signed-manifest
+          # Both files, so a manifest that was signed but whose signature did
+          # not upload is caught here rather than at the endpoint.
+          gh release download "${{ github.ref_name }}" --pattern 'latest.json*' --dir signed-manifest
+          python scripts/verify_release.py \
+            --manifest signed-manifest/latest.json --signature-only
+          gh release edit "${{ github.ref_name }}" --draft=false --latest
+          echo "Published ${{ github.ref_name }}: a copy asking the endpoint now"
+          echo "gets this release's manifest, signed, or the previous one's."
+
+  # Publishing the files and being updateable from them are different questions,
+  # and this job asks the second one. It runs only after `release` has succeeded
+  # - a skipped or failed release job skips this job with it - and then asks the
+  # endpoint the app asks what an installed copy would get, checking every asset
+  # the release publishes: the manifest, the signature published beside it, the
+  # key roll it carries, the installer the manifest points at, the signature
+  # published beside that, and the portable executable. A manifest that 404s,
+  # that is not signed, whose signature does not cover it, that names another
+  # version, that publishes a key roll this repository does not, an installer
+  # that does not match the signature it carries, a `.sig` that disagrees with
+  # the one the manifest embeds, or a portable build left behind by an earlier
+  # release is reported on the run for the tag, rather than in someone's status
+  # bar.
+  #
+  # It needs no token: a published release's assets are public, and the key it
+  # verifies against is the one committed in `tauri.conf.json`.
+  verify-release:
+    name: Verify the published release
+    needs: release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check every asset the published release carries
+        run: python scripts/verify_release.py "${{ github.ref_name }}"

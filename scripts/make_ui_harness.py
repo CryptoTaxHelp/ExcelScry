@@ -275,7 +275,7 @@ const HANDLERS = {
             "",
             "### Added",
             "",
-            "- **Self-updating** from the project's GitHub releases; `Settings › Updates` says what changed.",
+            "- **Self-updating** from the project's GitHub releases; `Settings › Updates` says what changed, and the [release page](https://github.com/CryptoTaxHelp/ExcelScry/releases) has the rest.",
             "",
             "### Fixed",
             "",
@@ -288,6 +288,14 @@ const HANDLERS = {
         }
       : null,
   install_update: () => null,
+  // Opening a link is the one command that leaves the app, so the harness
+  // records the address instead of opening it: the point of the check is which
+  // link a click asked for, and that nothing else was asked for.
+  open_link: (args = {}) => {
+    window.__opened = window.__opened || [];
+    window.__opened.push(args.url);
+    return null;
+  },
   install_associations: () => "Registered for the current user.",
   remove_associations: () => "Removed the ExcelScry context menu and file associations.",
   open_default_apps_settings: () => null,
