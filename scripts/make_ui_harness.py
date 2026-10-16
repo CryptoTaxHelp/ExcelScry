@@ -1,0 +1,221 @@
+"""Build a self-contained harness for the ExcelScry UI.
+
+The real app embeds its front end inside the executable, and its window cannot
+be driven by ordinary browser tooling. This generator inlines `ui/styles.css`
+and `ui/app.js` into a single HTML file together with a mock of the Tauri
+bridge, so the grid, tab strip, virtual scroller and dialogs can be exercised
+and screenshotted in a normal browser.
+
+The mock reproduces the IPC contract exactly (`get_rows` returns the same
+camelCase page shape as the Rust `RowsPage`, clamped to the sheet's extent), so
+the front end sees no difference between this and the real backend.
+
+Run from the repository root:  python scripts/make_ui_harness.py
+"""
+
+from __future__ import annotations
+
+import pathlib
+import re
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+UI = ROOT / "ui"
+OUT = ROOT / "test" / "ui-harness.html"
+
+MOCK = r"""
+// ---- Mocked Tauri bridge -------------------------------------------------
+
+const LOREM = "a very long value that should be clipped in the grid but shown in full in the readout";
+
+function salesCell(r, c) {
+  if (r === 5) {
+    const h = ["Region", "Product", "Units", "Unit price", "Revenue", "Ordered", "Notes"][c - 2];
+    return h ? ["s", h] : null;
+  }
+  if (r >= 6 && r <= 25) {
+    const regions = ["North", "South", "East", "West"];
+    switch (c) {
+      case 2: return ["s", regions[r % 4]];
+      case 3: return ["s", r % 2 ? "Widget" : "Gadget"];
+      case 4: return ["i", String(r * 137)];
+      case 5: return ["f", "19.99"];
+      case 6: return ["f", String((r * 137 * 19.99).toFixed(2))];
+      case 7: return ["d", `2026-0${(r % 9) + 1}-1${r % 10}`];
+      case 8: return r === 9 ? ["e", "#N/A upstream"] : ["s", "note " + r];
+      case 10: return ["t", `0${r % 9 + 1}:3${r % 6}:00`];
+      default: return null;
+    }
+  }
+  if (r === 30) {
+    // A value far wider than any column: it must truncate from the tail, never
+    // from the front, or the grid would show a different number.
+    return c === 2 ? ["i", "9223372036854775807"] : null;
+  }
+  return null;
+}
+
+function wideCell(r, c) {
+  if (r === 0) return ["s", `col ${c + 1}`];
+  if (c === 0) return ["i", String(r)];
+  return ["i", String((r * c) % 997)];
+}
+
+function tallCell(r, c) {
+  if (r === 0) return c === 0 ? ["s", "index"] : ["s", "value"];
+  if (c === 0) return ["i", String(r)];
+  if (c === 1) return ["f", String(((r * 37) % 1000) / 4)];
+  if (c === 2) return ["b", r % 2 ? "TRUE" : "FALSE"];
+  return null;
+}
+
+function markupCell(r, c) {
+  if (c !== 0) return null;
+  const values = [
+    "Markup-looking text must not be interpreted:",
+    // Assembled piecewise so no literal tag sequence appears inside this
+    // harness's own <script> block, which would close it early.
+    "<" + "script>alert('xss')<" + "/script>",
+    'a "quoted" & <angled> value',
+    "emoji \u2705 and accents \u00e9\u00f6\u00fc",
+    "=1+1 stays text when exported",
+    "000123",
+    LOREM,
+    "<img src=x onerror=alert(1)>",
+    "</td></tr><h1>injected</h1>",
+    "0.1 + 0.2",
+  ];
+  return r < values.length ? ["s", values[r]] : null;
+}
+
+const SHEETS = [
+  { name: "Sales report", rows: 200, cols: 11, firstUsed: 5, cell: salesCell },
+  { name: "Wide sheet", rows: 60, cols: 140, firstUsed: 0, cell: wideCell },
+  { name: "Tall sheet", rows: 50000, cols: 4, firstUsed: 0, cell: tallCell },
+  { name: "Unicode & escaping", rows: 12, cols: 3, firstUsed: 0, cell: markupCell },
+];
+
+function workbookInfo(path) {
+  return {
+    path,
+    fileName: "ExcelScry-sample.xlsx",
+    format: "Excel Workbook (xlsx)",
+    fileSize: 43341,
+    truncated: false,
+    totalCells: 0,
+    usedCells: 6423,
+    sheets: SHEETS.map((s) => ({
+      name: s.name,
+      rows: s.rows,
+      cols: s.cols,
+      usedCells: 0,
+      firstUsedRow: s.firstUsed,
+    })),
+  };
+}
+
+const HANDLERS = {
+  initial_file: () => null,
+  pick_workbook: () => "/mock/ExcelScry-sample.xlsx",
+  open_workbook: ({ path }) => workbookInfo(path),
+  close_workbook: () => null,
+  get_rows: ({ sheet, rowStart, rowCount, colStart, colCount }) => {
+    const s = SHEETS[sheet];
+    const rEnd = Math.min(rowStart + rowCount, s.rows);
+    const cEnd = Math.min(colStart + colCount, s.cols);
+    const rows = [];
+    for (let r = rowStart; r < rEnd; r++) {
+      const row = [];
+      for (let c = colStart; c < cEnd; c++) row.push(s.cell(r, c));
+      rows.push(row);
+    }
+    return {
+      sheet,
+      rowStart,
+      rowCount: rows.length,
+      colStart,
+      colCount: Math.max(cEnd - colStart, 0),
+      totalRows: s.rows,
+      totalCols: s.cols,
+      rows,
+    };
+  },
+  export_ods: () => ({
+    path: "C:\\Users\\you\\Documents\\ExcelScry-sample.ods",
+    sheets: 4,
+    cells: 6423,
+    bytes: 28417,
+    warnings: [],
+  }),
+  association_status: () => ({
+    exePath: "C:\\Program Files\\ExcelScry\\ExcelScry.exe",
+    userRegistered: false,
+    machineRegistered: true,
+    currentXlsxHandler: "Excel.Sheet.12",
+    currentXlsHandler: "ExcelScry.xls",
+    isDefaultXlsx: false,
+    isDefaultXls: true,
+    settingsUri: "ms-settings:defaultapps?registeredAppMachine=ExcelScry",
+    contextMenuNote: 'On Windows 11 the entry appears under "Show more options".',
+  }),
+  install_associations: () => "Registered for the current user.",
+  remove_associations: () => "Removed the ExcelScry context menu and file associations.",
+  open_default_apps_settings: () => null,
+  reveal_in_explorer: () => null,
+};
+
+window.__TAURI__ = {
+  core: {
+    invoke: async (cmd, args = {}) => {
+      const handler = HANDLERS[cmd];
+      if (!handler) throw new Error("unmocked command: " + cmd);
+      return handler(args);
+    },
+  },
+  event: { listen: async () => () => {} },
+  webview: { getCurrentWebview: () => ({ onDragDropEvent: () => {} }) },
+};
+"""
+
+
+def body_without_scripts(html: str) -> str:
+    body = re.search(r"<body[^>]*>(.*?)</body>", html, re.S)
+    if not body:
+        raise SystemExit("could not find <body> in ui/index.html")
+    content = body.group(1)
+    # The app script is inlined separately, after the mock bridge exists.
+    content = re.sub(r"<script[^>]*src=[^>]*>\s*</script>", "", content)
+    return content.strip()
+
+
+def main() -> None:
+    index = (UI / "index.html").read_text(encoding="utf-8")
+    styles = (UI / "styles.css").read_text(encoding="utf-8")
+    app = (UI / "app.js").read_text(encoding="utf-8")
+
+    html = f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>ExcelScry UI harness</title>
+    <style>
+{styles}
+    </style>
+  </head>
+  <body>
+{body_without_scripts(index)}
+    <script>
+{MOCK}
+    </script>
+    <script>
+{app}
+    </script>
+  </body>
+</html>
+"""
+    OUT.parent.mkdir(parents=True, exist_ok=True)
+    OUT.write_text(html, encoding="utf-8")
+    print(f"wrote {OUT.relative_to(ROOT)} ({OUT.stat().st_size} bytes)")
+
+
+if __name__ == "__main__":
+    main()

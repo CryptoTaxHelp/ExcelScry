@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ExcelScry</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <!-- Sits above everything so a drop works whether or not a file is open. -->
+    <div class="drop-overlay" id="drop-overlay" hidden>
+      <div class="drop-card">Drop a spreadsheet to open it</div>
+    </div>
+
+    <div class="app">
+      <header class="toolbar">
+        <div class="brand">
+          <svg class="brand-mark" viewBox="0 0 48 48" aria-hidden="true">
+            <rect x="1" y="1" width="46" height="46" rx="11" fill="#16233c" />
+            <rect x="7" y="13" width="26" height="26" rx="3" fill="#f7fafc" />
+            <rect x="7" y="13" width="26" height="5.5" rx="2.5" fill="#475569" />
+            <rect x="12" y="22" width="5" height="5" rx="1" fill="#22c55e" />
+            <rect x="23" y="27" width="5" height="5" rx="1" fill="#38bdf8" />
+            <rect x="17" y="32" width="5" height="5" rx="1" fill="#fbbf24" />
+            <circle cx="31" cy="22" r="8.5" fill="#38bdf8" fill-opacity="0.18" />
+            <circle cx="31" cy="22" r="8.5" fill="none" stroke="#e2e8f0" stroke-width="2.6" />
+            <line
+              x1="37"
+              y1="28"
+              x2="43"
+              y2="34"
+              stroke="#e2e8f0"
+              stroke-width="3"
+              stroke-linecap="round"
+            />
+          </svg>
+          <span class="brand-name">ExcelScry</span>
+        </div>
+
+        <button id="btn-open" class="btn btn-primary" type="button">Open file</button>
+        <button id="btn-export" class="btn" type="button" disabled>Export to ODS</button>
+        <button id="btn-reload" class="btn" type="button" disabled title="Re-read the file from disk">
+          Reload
+        </button>
+
+        <div class="toolbar-spacer"></div>
+
+        <div class="cell-readout" id="readout" title="Selected cell">
+          <span class="readout-ref" id="readout-ref">—</span>
+          <span class="readout-kind" id="readout-kind"></span>
+          <span class="readout-value" id="readout-value"></span>
+        </div>
+
+        <button id="btn-settings" class="btn btn-icon" type="button" title="Windows integration">
+          <svg viewBox="0 0 24 24" aria-hidden="true" class="icon">
+            <path
+              d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Zm7.4-2.3.1-1.2-.1-1.2 1.6-1.2-1.6-2.8-1.9.7a7.6 7.6 0 0 0-2.1-1.2L15 4.2h-3.2l-.4 2.1a7.6 7.6 0 0 0-2.1 1.2l-1.9-.7-1.6 2.8 1.6 1.2-.1 1.2.1 1.2-1.6 1.2 1.6 2.8 1.9-.7c.6.5 1.3.9 2.1 1.2l.4 2.1H15l.4-2.1c.8-.3 1.5-.7 2.1-1.2l1.9.7 1.6-2.8-1.6-1.2Z"
+            />
+          </svg>
+        </button>
+      </header>
+
+      <main class="stage" id="stage">
+        <!-- Shown before anything is loaded -->
+        <section class="welcome" id="welcome">
+          <div class="welcome-inner">
+            <svg class="welcome-mark" viewBox="0 0 48 48" aria-hidden="true">
+              <rect x="7" y="13" width="26" height="26" rx="3" fill="#1e293b" />
+              <rect x="7" y="13" width="26" height="5.5" rx="2.5" fill="#475569" />
+              <rect x="12" y="22" width="5" height="5" rx="1" fill="#22c55e" />
+              <rect x="23" y="27" width="5" height="5" rx="1" fill="#38bdf8" />
+              <rect x="17" y="32" width="5" height="5" rx="1" fill="#fbbf24" />
+              <circle cx="31" cy="22" r="8.5" fill="none" stroke="#e2e8f0" stroke-width="2.6" />
+              <line
+                x1="37"
+                y1="28"
+                x2="43"
+                y2="34"
+                stroke="#e2e8f0"
+                stroke-width="3"
+                stroke-linecap="round"
+              />
+            </svg>
+            <h1>ExcelScry</h1>
+            <p class="welcome-sub">
+              Open an Excel workbook or OpenDocument spreadsheet, or drop a file here.
+            </p>
+            <button id="btn-open-2" class="btn btn-primary btn-lg" type="button">
+              Choose a file
+            </button>
+            <p class="welcome-formats">
+              Reads <strong>.xlsx</strong> · <strong>.xlsm</strong> · <strong>.xls</strong> ·
+              <strong>.xlsb</strong> · <strong>.ods</strong> &nbsp;—&nbsp; exports
+              <strong>.ods</strong>
+            </p>
+          </div>
+        </section>
+
+        <!-- Shown once a workbook is open -->
+        <section class="viewer" id="viewer" hidden>
+          <div class="sheet">
+            <div class="corner" id="corner"></div>
+            <div class="cols-viewport" id="cols-viewport">
+              <div class="cols" id="cols"></div>
+            </div>
+            <div class="rows-viewport" id="rows-viewport">
+              <div class="rows" id="rows"></div>
+            </div>
+            <div class="body" id="body">
+              <div class="cells" id="cells"></div>
+            </div>
+          </div>
+          <div class="tabs" id="tabs"></div>
+        </section>
+      </main>
+
+      <footer class="statusbar">
+        <span class="status-file" id="status-file">No file open</span>
+        <span class="status-sep">•</span>
+        <span class="status-dim" id="status-sheet">—</span>
+        <span class="toolbar-spacer"></span>
+        <span class="status-flash" id="status-flash"></span>
+        <span class="status-dim" id="status-cells"></span>
+      </footer>
+    </div>
+
+    <!-- Windows integration -->
+    <div class="modal" id="settings" hidden>
+      <div class="modal-backdrop" data-close="1"></div>
+      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+        <header class="modal-head">
+          <h2 id="settings-title">Windows integration</h2>
+          <button class="btn btn-icon" id="btn-settings-close" type="button" aria-label="Close">
+            <svg viewBox="0 0 24 24" class="icon" aria-hidden="true">
+              <path
+                d="M6.4 5 5 6.4 10.6 12 5 17.6 6.4 19 12 13.4 17.6 19 19 17.6 13.4 12 19 6.4 17.6 5 12 10.6 6.4 5Z"
+              />
+            </svg>
+          </button>
+        </header>
+
+        <div class="modal-body">
+          <dl class="facts" id="assoc-facts">
+            <div><dt>Executable</dt><dd id="fact-exe">—</dd></div>
+            <div><dt>Registered for this user</dt><dd id="fact-user">—</dd></div>
+            <div><dt>Registered for all users</dt><dd id="fact-machine">—</dd></div>
+            <div>
+              <dt>Currently opens .xlsx</dt>
+              <dd id="fact-xlsx">—</dd>
+            </div>
+            <div>
+              <dt>Currently opens .xls</dt>
+              <dd id="fact-xls">—</dd>
+            </div>
+          </dl>
+
+          <p class="hint" id="assoc-note"></p>
+
+          <div class="modal-actions">
+            <button class="btn btn-primary" id="btn-assoc-install" type="button">
+              Add to context menu
+            </button>
+            <button class="btn" id="btn-assoc-remove" type="button">Remove</button>
+            <button class="btn" id="btn-assoc-default" type="button">
+              Make ExcelScry the default…
+            </button>
+          </div>
+
+          <section class="explain">
+            <h3>Why "Make default" opens Windows Settings</h3>
+            <p>
+              Installing the <strong>Scry Excel File</strong> context-menu entry works directly, and
+              the installer does that for you. Becoming the program that
+              <em>opens</em> .xlsx and .xls by default is different: since Windows 8 the choice is
+              stored in a hash-protected <code>UserChoice</code> key that only Windows itself may
+              write. An installer that fakes it is silently ignored, so ExcelScry registers itself
+              as a candidate and hands you the one-click confirmation in
+              <em>Settings&nbsp;›&nbsp;Apps&nbsp;›&nbsp;Default apps</em> instead.
+            </p>
+            <p class="explain-dim">
+              On Windows 11 you will find the context-menu entry under
+              <strong>Show more options</strong> (Shift+F10).
+            </p>
+          </section>
+        </div>
+      </div>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>

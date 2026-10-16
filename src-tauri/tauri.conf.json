@@ -1,0 +1,61 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "ExcelScry",
+  "version": "0.1.0",
+  "identifier": "com.excelscry.viewer",
+  "build": {
+    "frontendDist": "../ui"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "ExcelScry",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 640,
+        "minHeight": 420,
+        "resizable": true,
+        "center": true,
+        "dragDropEnabled": true,
+        "visible": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/64x64.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.png",
+      "icons/icon.ico"
+    ],
+    "publisher": "ExcelScry",
+    "shortDescription": "View XLS and XLSX spreadsheets and export them to ODS",
+    "longDescription": "ExcelScry opens Excel workbooks (.xlsx, .xlsm, .xlsb, .xls) and OpenDocument spreadsheets, renders them in a fast virtualised grid, and exports any open workbook to OpenDocument (.ods) format. The installer adds a \"Scry Excel File\" entry to the Explorer context menu and registers ExcelScry in Windows' Default Apps list.",
+    "copyright": "Copyright © 2026 ExcelScry",
+    "licenseFile": "../LICENSE",
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "installMode": "perMachine",
+        "languages": ["English"],
+        "displayLanguageSelector": false,
+        "installerIcon": "icons/icon.ico",
+        "startMenuFolder": "ExcelScry",
+        "installerHooks": "./windows/hooks.nsh",
+        "compression": "lzma"
+      }
+    }
+  }
+}

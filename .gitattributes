@@ -1,0 +1,20 @@
+# Normalise text in the repository and check out the platform's native endings,
+# except where a specific ending is required for the file to work.
+* text=auto
+
+# A CRLF shebang makes a shell script fail with "bad interpreter".
+*.sh text eol=lf
+
+# Windows-native scripts and NSIS headers expect CRLF.
+*.ps1 text eol=crlf
+*.nsh text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary assets: never normalise, never diff.
+*.png binary
+*.ico binary
+*.exe binary
+*.dll binary
+*.xlsx binary
+*.xlsm binary
