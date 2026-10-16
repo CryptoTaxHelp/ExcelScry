@@ -265,7 +265,27 @@ const HANDLERS = {
   app_version: () => "0.1.0",
   check_for_update: () =>
     UPDATE_AVAILABLE
-      ? { version: "0.1.1", current_version: "0.1.0", notes: "A newer release." }
+      ? {
+          version: "0.1.1",
+          current_version: "0.1.0",
+          // A realistic release body: the changelog section plus the commit
+          // list, which is what the dialog has to render.
+          notes: [
+            "## [0.1.1] - 2026-10-16",
+            "",
+            "### Added",
+            "",
+            "- **Self-updating** from the project's GitHub releases; `Settings › Updates` says what changed.",
+            "",
+            "### Fixed",
+            "",
+            "- The Windows integration dialog lists every registered extension, `.xlsm` included.",
+            "",
+            "### Commits since v0.1.0",
+            "",
+            "- Add self-updating from GitHub releases (a7b0375)",
+          ].join("\n"),
+        }
       : null,
   install_update: () => null,
   install_associations: () => "Registered for the current user.",

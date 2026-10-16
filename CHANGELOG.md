@@ -9,6 +9,22 @@ those entries into a version section and tags the commit that holds it.
 
 ## [Unreleased]
 
+### Added
+
+- **What's new, before it is installed.** The notes the release manifest carries
+  — the same text the release page shows — are rendered in
+  **Settings › Updates** as headings, bullets and emphasis, so an update can be
+  read inside the app before anything is downloaded. They arrive with the check
+  that already ran; nothing extra is fetched. The notes are Markdown rather than
+  HTML, so they are built out of elements and text nodes: a note containing
+  markup shows the characters, not the markup.
+- **A release is one command.** `python scripts/release.py 0.2.0` bumps the four
+  copies of the version, moves the `Unreleased` entries into a dated section,
+  commits, tags and pushes — and refuses to start unless the tree is clean, the
+  branch is in step with its upstream, the version is ahead of the current one
+  and there are entries to release. It prints the notes the release page will
+  carry before pushing, and `--dry-run` stops before anything is written.
+
 ## [0.1.1] - 2026-10-16
 
 ### Added

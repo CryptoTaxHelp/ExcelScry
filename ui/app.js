@@ -94,6 +94,9 @@ const els = {
   updateNote: document.getElementById("update-note"),
   factVersion: document.getElementById("fact-version"),
   factUpdate: document.getElementById("fact-update"),
+  releaseNotes: document.getElementById("release-notes"),
+  releaseNotesTitle: document.getElementById("release-notes-title"),
+  releaseNotesBody: document.getElementById("release-notes-body"),
   btnCheckUpdates: document.getElementById("btn-check-updates"),
   btnInstallUpdate: document.getElementById("btn-install-update"),
   trust: document.getElementById("trust"),
@@ -797,6 +800,83 @@ function renderUpdateFacts() {
     }
   }
   if (els.btnInstallUpdate) els.btnInstallUpdate.hidden = !state.update;
+  renderReleaseNotes(state.update);
+}
+
+/** How much of the notes to render. The rest is on the release page. */
+const NOTES_LIMIT = 8000;
+
+/**
+ * Render the manifest's notes, which are Markdown.
+ *
+ * The notes are the release body: they arrive with the manifest and are covered
+ * by the signature over it, like every other field. That says who wrote them,
+ * not that they are HTML, so they are still treated as text: every node here is
+ * created with `createElement` or `createTextNode`, never `innerHTML`, which
+ * means a note containing markup renders as the characters someone typed. Only
+ * the shapes this project's own release notes use are understood - headings,
+ * bullets, `**bold**` and `` `code` `` - and anything else stays literal.
+ */
+function renderReleaseNotes(update) {
+  if (!els.releaseNotes) return;
+  const notes = update && update.notes ? String(update.notes) : "";
+  els.releaseNotesBody.replaceChildren();
+  els.releaseNotes.hidden = !notes.trim();
+  if (els.releaseNotes.hidden) return;
+
+  els.releaseNotesTitle.textContent = `What's new in ${update.version}`;
+  const lines = (notes.length > NOTES_LIMIT ? `${notes.slice(0, NOTES_LIMIT)}\n…` : notes)
+    .split(/\r?\n/);
+  // The body starts with the changelog's own version heading, which the title
+  // above already says.
+  const first = lines.findIndex((line) => line.trim());
+  if (first >= 0 && /^#{1,3}\s+\[?\d+\.\d+/.test(lines[first].trim())) lines.splice(first, 1);
+
+  let list = null;
+  for (const raw of lines) {
+    const line = raw.trimEnd();
+    const heading = /^#{1,6}\s+(.*)$/.exec(line.trim());
+    const bullet = /^[-*]\s+(.*)$/.exec(line.trim());
+    if (heading) {
+      list = null;
+      const headingEl = document.createElement("h5");
+      headingEl.textContent = heading[1].replace(/\*\*/g, "");
+      els.releaseNotesBody.append(headingEl);
+    } else if (bullet) {
+      if (!list) {
+        list = document.createElement("ul");
+        els.releaseNotesBody.append(list);
+      }
+      const item = document.createElement("li");
+      appendNoteText(bullet[1], item);
+      list.append(item);
+    } else if (line.trim()) {
+      list = null;
+      const paragraph = document.createElement("p");
+      appendNoteText(line.trim(), paragraph);
+      els.releaseNotesBody.append(paragraph);
+    } else {
+      list = null;
+    }
+  }
+}
+
+/** Add one line of note text, marking up only `**bold**` and `` `code` ``. */
+function appendNoteText(text, parent) {
+  for (const part of text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g)) {
+    if (!part) continue;
+    if (part.startsWith("**") && part.endsWith("**") && part.length > 4) {
+      const strong = document.createElement("strong");
+      strong.textContent = part.slice(2, -2);
+      parent.append(strong);
+    } else if (part.startsWith("`") && part.endsWith("`") && part.length > 2) {
+      const code = document.createElement("code");
+      code.textContent = part.slice(1, -1);
+      parent.append(code);
+    } else {
+      parent.append(document.createTextNode(part));
+    }
+  }
 }
 
 /** The status-bar pill, which exists only while there is something to install. */

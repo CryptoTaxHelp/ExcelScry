@@ -202,6 +202,14 @@
             is downloaded has to match the release signature before it is installed.
           </p>
 
+          <!-- What the release says about itself, shown only when there is a
+               newer version to consider. It arrives with the check that already
+               ran - nothing is fetched to fill it in. -->
+          <section class="release-notes" id="release-notes" hidden>
+            <h4 id="release-notes-title">What's new</h4>
+            <div class="release-notes-body" id="release-notes-body"></div>
+          </section>
+
           <div class="modal-actions">
             <button class="btn" id="btn-check-updates" type="button">Check for updates</button>
             <button class="btn btn-primary" id="btn-install-update" type="button" hidden>
