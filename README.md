@@ -435,7 +435,7 @@ shipped.
 ## Continuous integration
 
 [.github/workflows/ci.yml](.github/workflows/ci.yml) runs on every push, every
-pull request, and on demand from the Actions tab. Both jobs use
+pull request, and on demand from the Actions tab. Every job uses
 `windows-latest`, because the app is Windows-only — the shell integration is
 built on `winreg` and `windows-sys`, and a Linux runner would need the
 `webkit2gtk` development packages before it could build at all.
@@ -491,6 +491,24 @@ while checking `.ps1`, `.nsh`, `.bat` and `.cmd` out as CRLF. The two are a pair
 `.editorconfig` decides what an editor writes, `.gitattributes` what git stores,
 and neither should be changed without the other.
 
+**`mutants`** asks whether that test is still worth what it claims. It runs
+[`scripts/mutate_release.py`](scripts/mutate_release.py), which breaks
+`release.py` one deliberate way at a time — the branch-is-ahead-of-its-remote
+check removed, the `Unreleased` entries left out of the new section, a
+lightweight tag instead of an annotated one, `--resume` counting a commit it just
+made as already pushed — and requires
+[`scripts/test_release.py`](scripts/test_release.py) to fail for the mutation it
+claims. A mutation the test passes, or one it fails on somewhere other than that
+case, is a hole: the run reports it and exits 1, because a test that has stopped
+catching something goes on passing, and would go on passing on the commit that
+breaks the flow. Every mutation is applied to a repository a worker made for
+itself out of this checkout — the test ends by comparing the `HEAD` and
+`git status` of the root it runs from, so the copy has to be one — and never to
+the working tree, so a run cannot leave a mutated `release.py` behind. It takes
+minutes rather than seconds, which is why it is a job of its own beside `checks`
+rather than a step in it, and it is skipped for a tag, whose branch push has
+already been through it.
+
 **`installer`** builds the app and bundles the NSIS installer through
 [`tauri-apps/tauri-action`](https://github.com/tauri-apps/tauri-action), then
 uploads the executables and bundles as a workflow artifact. It passes no
@@ -498,6 +516,16 @@ uploads the executables and bundles as a workflow artifact. It passes no
 needed, and no updater files are uploaded — there is no release for them to
 belong to. It does pass `TAURI_SIGNING_PRIVATE_KEY` from the repository secret,
 because the build signs its updater artifact whether or not anyone publishes it.
+A repository without that secret stops in a step of its own that says so, before
+the build: a secret nobody set reaches the bundler as an *empty* variable rather
+than a missing one, because that is what GitHub resolves an unset secret to, and
+the complaint the bundler has for a missing key does not cover that — what comes
+out instead is the key's decode failing with
+`incorrect updater private key password: Missing comment in secret key`, which
+blames the password rather than the key and never says a secret is missing. The
+step is the same refusal `scripts/build.sh` and `scripts/build.ps1` make for a
+local build, and it is what the `installer` job fails on while the secret is not
+there.
 Two things that are deliberately absent:
 
 - **no Node/npm setup** — the front end is static files that `frontendDist`
@@ -609,7 +637,10 @@ message, so the way out is in the output rather than in this file.
 Every push runs the same sequence in a throwaway repository:
 [`scripts/test_release.py`](scripts/test_release.py) is what makes the refusals
 above, the release itself, and the states a failed run leaves behind — finished
-by `--resume`, or refused — checked behaviour rather than a description of one.
+by `--resume`, or refused — checked behaviour rather than a description of one,
+and [`scripts/mutate_release.py`](scripts/mutate_release.py) is what keeps that
+test honest: it breaks the flow a mutation at a time, and a mutation the test
+does not notice is a failure of its own.
 
 The three pieces are still usable on their own:
 

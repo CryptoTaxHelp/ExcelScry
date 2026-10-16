@@ -137,6 +137,32 @@ those entries into a version section and tags the commit that holds it.
   is answered, cancelling costs nothing, and the full notes are a click away in
   **Settings › Updates**.
 
+### Development
+
+- **The release flow's test is checked against a broken release flow.**
+  `scripts/test_release.py` is only worth what it catches, and a test that has
+  stopped catching something goes on passing - including on the commit that
+  breaks the flow. `scripts/mutate_release.py` breaks `release.py` one deliberate
+  way at a time and requires the test to fail for the mutation it claims; a
+  mutation it passes, or one it fails on somewhere other than that case, is a
+  hole, and the run exits 1 on it rather than reporting a green one. Every
+  mutation is applied to a repository a worker copies out of the checkout, never
+  to the working tree, so a run cannot leave a mutated `release.py` behind. It
+  runs as its own job (`mutants`), beside `checks` rather than after it, and is
+  skipped for a tag, whose branch push has already been through it.
+- **A missing updater signing key is reported as one.** The `installer` job needs
+  `TAURI_SIGNING_PRIVATE_KEY`, because `createUpdaterArtifacts` is on and every
+  `tauri build` signs its own updater artifact. A secret that was never set
+  reaches the bundler as an *empty* variable rather than an absent one - which is
+  what GitHub resolves an unset secret to - so the bundler's own "no private key"
+  error never fires. The build dies later, decoding the key, with
+  `incorrect updater private key password: Missing comment in secret key`, which
+  blames the password rather than the key and never says a secret is missing; it
+  reads like a broken build rather than a setting nobody made. The key is now
+  checked in a step of its own, before anything is built, so the job fails saying
+  which secret is missing and where to add it. The build scripts already refuse a
+  keyless build the same way, from the environment or `~/.tauri/ExcelScry.key`.
+
 ## [0.1.1] - 2026-10-16
 
 ### Added

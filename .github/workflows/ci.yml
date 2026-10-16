@@ -88,6 +88,37 @@ jobs:
           python -m pip install --quiet pyyaml
           python scripts/verify_workflow.py
 
+  # The release flow's test is worth what it catches, and a test that has stopped
+  # catching something goes on passing - including on the commit that breaks the
+  # flow. This breaks `release.py` one deliberate way at a time and requires the
+  # test to fail for the mutation it claims. It takes minutes rather than
+  # seconds, which is why it is a job of its own rather than a step in `checks`,
+  # and it is skipped for a tag, whose branch push has already been through it.
+  mutants:
+    name: Release flow mutation check
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # One of the checks a release runs is `cargo metadata --locked`, so the
+      # toolchain has to be here. Nothing is compiled, but this is the same
+      # workspace and key the other jobs cache under, and what it brings with it
+      # is the registry index `cargo metadata` would otherwise fetch.
+      - name: Cache build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      # Every mutation is applied to a copy of the checkout that a worker makes
+      # for itself, never to the files this job runs from, so a run cannot leave
+      # a mutated release.py behind for a person debugging it later.
+      - name: Check that breaking the release flow breaks its test
+        run: python scripts/mutate_release.py
+
   # The portable executable and the NSIS installer, built the same way
   # scripts/build.sh builds them locally. No tagName/releaseId is passed, so
   # nothing is published; the bundles are uploaded as a workflow artifact.
@@ -107,15 +138,61 @@ jobs:
         with:
           workspaces: src-tauri -> target
 
+      # The key the build signs with is a repository secret, and one that is not
+      # set arrives at the bundler as an *empty* variable rather than an absent
+      # one, because that is what GitHub resolves an unset secret to. The
+      # bundler's own "no private key" complaint is for the absent case, so an
+      # empty one gets past it and the build dies later instead, decoding the
+      # key:
+      #
+      #     incorrect updater private key password: Missing comment in secret key
+      #
+      # which blames the password, never mentions the key, and never says a
+      # secret is missing at all - the same decode `tauri signer sign` reports
+      # with the variable set to nothing. So the absence is reported here
+      # instead, before anything is built, with the one thing that resolves it.
+      # `scripts/build.sh` and `scripts/build.ps1` refuse a keyless build the
+      # same way, from the environment or `~/.tauri/ExcelScry.key`.
+      - name: Check that the updater signing key is set
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          key="${TAURI_SIGNING_PRIVATE_KEY:-}"
+          if [[ -n "${key//[[:space:]]/}" ]]; then
+              echo "TAURI_SIGNING_PRIVATE_KEY is set: this build can sign its updater artifact."
+              exit 0
+          fi
+          # The annotation is what the run's summary shows; the lines after it
+          # are what someone reading the failed step's log sees first.
+          echo "::error title=TAURI_SIGNING_PRIVATE_KEY is not set::This repository has no TAURI_SIGNING_PRIVATE_KEY secret, so the build cannot sign the updater artifact it is configured to produce. Add it under Settings -> Secrets and variables -> Actions."
+          echo
+          echo 'error: the updater signing key is missing, so this build would be unsigned.'
+          echo '       Nothing this job does can fix that; the secret has to be added first.'
+          echo
+          echo '  Settings -> Secrets and variables -> Actions -> New repository secret'
+          echo
+          echo '    Name   TAURI_SIGNING_PRIVATE_KEY'
+          echo '    Value  the contents of the private key file, or a path to it'
+          echo
+          echo '  That key is the one `cargo tauri signer generate -w ~/.tauri/ExcelScry.key`'
+          echo '  wrote, and its public half is the plugins.updater.pubkey committed in'
+          echo '  src-tauri/tauri.conf.json: the two have to be a pair, or the release is'
+          echo '  one no installed copy would accept. It was generated with an empty'
+          echo '  password, so TAURI_SIGNING_PRIVATE_KEY_PASSWORD stays unset unless the'
+          echo "  key has one. 'Updates' in README.md has the whole of it."
+          exit 1
+
       # No Node or npm setup is needed: the front end is plain HTML/CSS/JS that
       # `frontendDist` points straight at, and there is no beforeBuildCommand.
       #
       # No NSIS install step either: tauri-bundler fetches and hash-verifies
       # its own toolset (NSIS_URL in tauri-bundler's windows/nsis module).
       #
-      # The signing key is required here too: `createUpdaterArtifacts` is on, so
-      # every `tauri build` signs its updater artifact, and the bundler refuses
-      # to build without the private half of the key in tauri.conf.json.
+      # It does need the signing key, because `createUpdaterArtifacts` is on and
+      # every `tauri build` signs its updater artifact; the step above reports
+      # that key being missing, before the build rather than inside it.
       - name: Build the app and the installer
         uses: tauri-apps/tauri-action@v1
         env:
