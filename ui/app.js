@@ -59,6 +59,15 @@ const state = {
   generation: 0,
   selection: { row: 0, col: 0 },
   busy: false,
+  /** The version this build reports, once the Rust side has been asked. */
+  version: "",
+  /** The update the release manifest announced, or null. */
+  update: null,
+  updateChecked: false,
+  /** Why the last check failed, if it did - "up to date" would be a lie. */
+  updateError: "",
+  checkingUpdate: false,
+  updating: false,
 };
 
 const els = {
@@ -80,6 +89,13 @@ const els = {
   statusNote: document.getElementById("status-note"),
   trustBadge: document.getElementById("trust-badge"),
   trustBadgeText: document.getElementById("trust-badge-text"),
+  updatePill: document.getElementById("update-pill"),
+  updatePillText: document.getElementById("update-pill-text"),
+  updateNote: document.getElementById("update-note"),
+  factVersion: document.getElementById("fact-version"),
+  factUpdate: document.getElementById("fact-update"),
+  btnCheckUpdates: document.getElementById("btn-check-updates"),
+  btnInstallUpdate: document.getElementById("btn-install-update"),
   trust: document.getElementById("trust"),
   btnOpen: document.getElementById("btn-open"),
   btnOpen2: document.getElementById("btn-open-2"),
@@ -87,6 +103,7 @@ const els = {
   btnReload: document.getElementById("btn-reload"),
   btnSettings: document.getElementById("btn-settings"),
   settings: document.getElementById("settings"),
+  assocFacts: document.getElementById("assoc-facts"),
 };
 
 // --------------------------------------------------------------------------
@@ -680,6 +697,7 @@ function yesNo(value, yes, no) {
 
 async function openSettings() {
   els.settings.hidden = false;
+  renderUpdateFacts();
   try {
     const status = await invoke("association_status");
     document.getElementById("fact-exe").textContent = status.exePath || "unknown";
@@ -693,14 +711,7 @@ async function openSettings() {
       "Yes (installer)",
       "No"
     );
-    document.getElementById("fact-xlsx").innerHTML = handlerHtml(
-      status.currentXlsxHandler,
-      status.isDefaultXlsx
-    );
-    document.getElementById("fact-xls").innerHTML = handlerHtml(
-      status.currentXlsHandler,
-      status.isDefaultXls
-    );
+    renderExtensionFacts(status.extensions);
     document.getElementById("assoc-note").textContent =
       status.userRegistered || status.machineRegistered
         ? status.contextMenuNote
@@ -708,12 +719,41 @@ async function openSettings() {
   } catch (err) {
     document.getElementById("assoc-note").textContent = String(err);
   }
+  await refreshVersion();
+  renderUpdateFacts();
 }
 
 function handlerHtml(handler, isDefault) {
   if (!handler) return `<span class="no">no handler recorded</span>`;
   const label = esc(handler);
   return isDefault ? `<span class="ok">ExcelScry</span> (${label})` : label;
+}
+
+/**
+ * One row per extension ExcelScry registers with the shell.
+ *
+ * The rows come from the status rather than from a fixed list in the markup, so
+ * a format added to the Rust side's registration table shows up here without a
+ * front-end change. Macro-enabled workbooks are the case that made this matter:
+ * `.xlsm` is registered exactly like `.xlsx` and `.xls`, and a list that named
+ * only two of them quietly hid a format the app does handle — the rows it fed
+ * were also reading fields the backend has never sent, so they said
+ * "no handler recorded" while the registry said otherwise.
+ */
+function renderExtensionFacts(extensions) {
+  for (const row of els.assocFacts.querySelectorAll("[data-extension]")) {
+    row.remove();
+  }
+  for (const ext of extensions || []) {
+    const row = document.createElement("div");
+    row.dataset.extension = ext.ext;
+    const term = document.createElement("dt");
+    term.textContent = `Currently opens ${ext.ext}`;
+    const value = document.createElement("dd");
+    value.innerHTML = handlerHtml(ext.currentHandler, ext.isDefault);
+    row.append(term, value);
+    els.assocFacts.append(row);
+  }
 }
 
 function closeSettings() {
@@ -731,6 +771,103 @@ async function withSettingsRefresh(action) {
 }
 
 // --------------------------------------------------------------------------
+// Updates
+// --------------------------------------------------------------------------
+
+/** The version this build reports, so the dialog can name it without a network. */
+async function refreshVersion() {
+  if (state.version) return state.version;
+  try {
+    state.version = await invoke("app_version");
+  } catch {
+    state.version = "";
+  }
+  return state.version;
+}
+
+function renderUpdateFacts() {
+  if (els.factVersion) els.factVersion.textContent = state.version || "—";
+  if (els.factUpdate) {
+    if (state.update) {
+      els.factUpdate.innerHTML = `<span class="ok">${esc(state.update.version)}</span>`;
+    } else if (state.updateError) {
+      els.factUpdate.innerHTML = `<span class="no">check failed</span>`;
+    } else {
+      els.factUpdate.textContent = state.updateChecked ? "up to date" : "not checked yet";
+    }
+  }
+  if (els.btnInstallUpdate) els.btnInstallUpdate.hidden = !state.update;
+}
+
+/** The status-bar pill, which exists only while there is something to install. */
+function renderUpdatePill() {
+  const info = state.update;
+  els.updatePill.hidden = !info;
+  if (!info) return;
+  els.updatePillText.textContent = `Update to ${info.version}`;
+  els.updatePill.title = state.version
+    ? `ExcelScry ${state.version} → ${info.version} — click to download and install`
+    : `ExcelScry ${info.version} is available — click to download and install`;
+}
+
+/**
+ * Ask the release manifest what the latest version is.
+ *
+ * `silent` is for the check that runs at start-up: a viewer opening a
+ * spreadsheet should not report that it could not reach GitHub.
+ */
+async function checkForUpdate({ silent = false } = {}) {
+  if (state.checkingUpdate) return;
+  state.checkingUpdate = true;
+  if (els.btnCheckUpdates) els.btnCheckUpdates.disabled = true;
+  try {
+    await refreshVersion();
+    const info = await invoke("check_for_update");
+    state.update = info || null;
+    state.updateChecked = true;
+    state.updateError = "";
+    if (els.updateNote) {
+      els.updateNote.textContent = info
+        ? `ExcelScry ${info.version} is available. It will be downloaded, checked against the release signature, and installed for you.`
+        : "This build is the latest release.";
+    }
+    if (!silent) flash(info ? `ExcelScry ${info.version} is available` : "ExcelScry is up to date");
+  } catch (err) {
+    state.update = null;
+    state.updateError = String(err);
+    if (els.updateNote) els.updateNote.textContent = `Could not check for updates: ${String(err)}`;
+    if (!silent) flash(`Could not check for updates: ${String(err)}`, true);
+  } finally {
+    state.checkingUpdate = false;
+    if (els.btnCheckUpdates) els.btnCheckUpdates.disabled = false;
+    renderUpdatePill();
+    renderUpdateFacts();
+  }
+}
+
+/**
+ * Download, verify and install, then let the installer take over: on Windows
+ * it closes this app and starts the new version itself.
+ */
+async function installUpdate() {
+  if (!state.update || state.updating) return;
+  state.updating = true;
+  els.updatePill.disabled = true;
+  if (els.btnInstallUpdate) els.btnInstallUpdate.disabled = true;
+  flash(`Downloading ExcelScry ${state.update.version}…`);
+  try {
+    await invoke("install_update");
+    // Only reached if the installer did not take the app down with it.
+    flash("The installer is running — ExcelScry restarts when it finishes.");
+  } catch (err) {
+    state.updating = false;
+    els.updatePill.disabled = false;
+    if (els.btnInstallUpdate) els.btnInstallUpdate.disabled = false;
+    flash(String(err), true);
+  }
+}
+
+// --------------------------------------------------------------------------
 // Wiring
 // --------------------------------------------------------------------------
 
@@ -742,6 +879,19 @@ function initEvents() {
     if (state.info) openPath(state.info.path);
   });
   els.btnSettings.addEventListener("click", openSettings);
+
+  els.updatePill.addEventListener("click", installUpdate);
+  els.btnCheckUpdates.addEventListener("click", () => checkForUpdate());
+  els.btnInstallUpdate.addEventListener("click", installUpdate);
+  listen("update-progress", (event) => {
+    const progress = event.payload || {};
+    const version = state.update ? state.update.version : "the update";
+    const size = progress.total ? ` (${formatBytes(progress.total)})` : "";
+    const share = progress.total
+      ? ` ${Math.round((progress.downloaded / progress.total) * 100)}%`
+      : ` ${formatBytes(progress.downloaded)}`;
+    flash(`Downloading ExcelScry ${version}${size}…${share}`);
+  });
   document.getElementById("btn-settings-close").addEventListener("click", closeSettings);
   els.settings.addEventListener("click", (event) => {
     if (event.target.dataset.close) closeSettings();
@@ -857,6 +1007,11 @@ async function init() {
   } catch (err) {
     flash(String(err), true);
   }
+  // One quiet check at start-up. If a newer release exists the status bar
+  // offers it; nothing is downloaded until that is clicked, and being offline
+  // is not worth a message over someone's spreadsheet.
+  await refreshVersion();
+  checkForUpdate({ silent: true });
 }
 
 init();

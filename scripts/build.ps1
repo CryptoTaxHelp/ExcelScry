@@ -10,6 +10,19 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $root
 
+# Updater artifacts are signed, so the bundler needs the private half of the key
+# whose public half is in tauri.conf.json. The environment wins (CI passes it
+# from a secret); otherwise the usual local location is used. The variable
+# accepts either the key's contents or a path to the file.
+if (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
+    $localKey = Join-Path $HOME ".tauri/ExcelScry.key"
+    if (Test-Path $localKey) {
+        $env:TAURI_SIGNING_PRIVATE_KEY = $localKey
+    } else {
+        throw "the updater signing key is missing, so this build would be unsigned. Set TAURI_SIGNING_PRIVATE_KEY, or put the private key at $localKey. See 'Updates' in README.md."
+    }
+}
+
 $conf = Get-Content "src-tauri/tauri.conf.json" -Raw | ConvertFrom-Json
 # The version is read from the manifest, never hardcoded here: a stale literal
 # would silently mislabel the installer. scripts/bump_version.py keeps

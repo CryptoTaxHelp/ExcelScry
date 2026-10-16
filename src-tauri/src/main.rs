@@ -6,6 +6,7 @@ mod associations;
 mod model;
 mod ods_export;
 mod trust;
+mod update;
 mod workbook;
 
 use std::path::{Path, PathBuf};
@@ -252,7 +253,11 @@ fn first_file_arg(args: &[String]) -> Option<String> {
 }
 
 fn main() {
-    let mut builder = tauri::Builder::default().plugin(tauri_plugin_dialog::init());
+    let mut builder = tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        // Reads `plugins.updater` from tauri.conf.json: the endpoint and the
+        // public key an update has to be signed with.
+        .plugin(tauri_plugin_updater::Builder::new().build());
 
     // Reuse a single window: a file viewer launched from a file association
     // should not pile up processes.
@@ -284,6 +289,9 @@ fn main() {
             remove_associations,
             open_default_apps_settings,
             reveal_in_explorer,
+            update::app_version,
+            update::check_for_update,
+            update::install_update,
         ])
         .setup(|app| {
             if let Some(path) = first_file_arg(&std::env::args().collect::<Vec<_>>()) {

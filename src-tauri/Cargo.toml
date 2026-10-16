@@ -4,7 +4,9 @@ version = "0.1.0"
 description = "ExcelScry - a fast XLS / XLSX viewer with ODS export"
 authors = ["ExcelScry"]
 edition = "2021"
-rust-version = "1.77"
+# tauri-plugin-updater requires 1.90; the number here is what a contributor's
+# toolchain has to satisfy, so it has to cover every dependency.
+rust-version = "1.90"
 license = "MIT"
 default-run = "ExcelScry"
 
@@ -21,6 +23,12 @@ calamine = { version = "0.36.1", features = ["dates"] }
 spreadsheet-ods = "1.0.4"
 # Already in the tree via calamine; used directly to list a package's parts.
 zip = "8.6.0"
+# Default features are off on purpose: the `zip` feature pulls in `zip ^4`, and
+# every published 4.x of that crate is yanked, so the resolver cannot pick one.
+# It is only needed to unpack a zipped updater payload (the legacy
+# `nsis.zip`/AppImage-tarball formats); this app publishes the NSIS setup.exe,
+# which the updater runs directly.
+tauri-plugin-updater = { version = "2.14.0", default-features = false, features = ["rustls-tls", "system-proxy"] }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56.0"

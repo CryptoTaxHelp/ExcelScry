@@ -82,8 +82,14 @@ jobs:
       #
       # No NSIS install step either: tauri-bundler fetches and hash-verifies
       # its own toolset (NSIS_URL in tauri-bundler's windows/nsis module).
+      #
+      # The signing key is required here too: `createUpdaterArtifacts` is on, so
+      # every `tauri build` signs its updater artifact, and the bundler refuses
+      # to build without the private half of the key in tauri.conf.json.
       - name: Build the app and the installer
         uses: tauri-apps/tauri-action@v1
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         with:
           projectPath: src-tauri
           uploadWorkflowArtifacts: true
@@ -136,6 +142,10 @@ jobs:
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Signs the updater artifact. The matching public key is committed in
+          # tauri.conf.json; without this secret the build fails rather than
+          # publishing something the updater would refuse.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         with:
           projectPath: src-tauri
           tagName: ${{ github.ref_name }}
@@ -147,5 +157,8 @@ jobs:
           # Both deliverables reach the release page: the portable executable
           # and the NSIS installer.
           uploadPlainBinary: true
-          uploadUpdaterJson: false
-          uploadUpdaterSignatures: false
+          # The manifest the app updates from - `latest.json`, the asset the
+          # updater endpoint resolves - plus the .sig it embeds.
+          uploadUpdaterJson: true
+          updaterJsonPreferNsis: true
+          uploadUpdaterSignatures: true

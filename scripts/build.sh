@@ -15,6 +15,20 @@ cd "$ROOT"
 # The version is read from the manifest, never hardcoded here: a stale literal
 # would silently mislabel the installer. scripts/bump_version.py keeps
 # tauri.conf.json, Cargo.toml, Cargo.lock and the README in step.
+# Updater artifacts are signed, so the bundler needs the private half of the key
+# whose public half is in tauri.conf.json. The environment wins (CI passes it
+# from a secret); otherwise the usual local location is used. The variable
+# accepts either the key's contents or a path to the file.
+if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" && -f "$HOME/.tauri/ExcelScry.key" ]]; then
+    export TAURI_SIGNING_PRIVATE_KEY="$HOME/.tauri/ExcelScry.key"
+fi
+if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
+    echo "error: the updater signing key is missing, so this build would be unsigned." >&2
+    echo "       Set TAURI_SIGNING_PRIVATE_KEY, or put the private key at" >&2
+    echo "       ~/.tauri/ExcelScry.key. See \"Updates\" in README.md." >&2
+    exit 1
+fi
+
 VERSION="$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' src-tauri/tauri.conf.json 2>/dev/null | head -1)" || true
 if [[ -z "$VERSION" ]]; then
     echo "error: no version found in src-tauri/tauri.conf.json" >&2

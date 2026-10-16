@@ -188,6 +188,8 @@ function workbookInfo(path) {
   };
 }
 
+const UPDATE_AVAILABLE = true;
+
 const HANDLERS = {
   initial_file: () => null,
   pick_workbook: () => "/mock/ExcelScry-sample.xlsx",
@@ -225,13 +227,47 @@ const HANDLERS = {
     exePath: "C:\\Program Files\\ExcelScry\\ExcelScry.exe",
     userRegistered: false,
     machineRegistered: true,
-    currentXlsxHandler: "Excel.Sheet.12",
-    currentXlsHandler: "ExcelScry.xls",
-    isDefaultXlsx: false,
-    isDefaultXls: true,
+    // One entry per extension the app registers, in registration order. The
+    // dialog renders whatever is here, so a fourth format would need no change
+    // on the front end.
+    extensions: [
+      {
+        ext: ".xlsx",
+        progid: "ExcelScry.xlsx",
+        currentHandler: "Excel.Sheet.12",
+        isDefault: false,
+        registeredForUser: false,
+        registeredMachine: true,
+      },
+      {
+        ext: ".xlsm",
+        progid: "ExcelScry.xlsm",
+        currentHandler: "Excel.SheetMacroEnabled.12",
+        isDefault: false,
+        registeredForUser: false,
+        registeredMachine: true,
+      },
+      {
+        ext: ".xls",
+        progid: "ExcelScry.xls",
+        currentHandler: "ExcelScry.xls",
+        isDefault: true,
+        registeredForUser: false,
+        registeredMachine: true,
+      },
+    ],
     settingsUri: "ms-settings:defaultapps?registeredAppMachine=ExcelScry",
     contextMenuNote: 'On Windows 11 the entry appears under "Show more options".',
   }),
+  // The updater bridge. Set UPDATE_AVAILABLE to false to see the "up to date"
+  // state; a real install downloads a verified installer, closes the app and
+  // lets the installer start the new version, which a harness cannot show.
+  app_version: () => "0.1.0",
+  check_for_update: () =>
+    UPDATE_AVAILABLE
+      ? { version: "0.1.1", current_version: "0.1.0", notes: "A newer release." }
+      : null,
+  install_update: () => null,
   install_associations: () => "Registered for the current user.",
   remove_associations: () => "Removed the ExcelScry context menu and file associations.",
   open_default_apps_settings: () => null,

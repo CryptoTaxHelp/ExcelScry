@@ -9,6 +9,28 @@ those entries into a version section and tags the commit that holds it.
 
 ## [Unreleased]
 
+### Added
+
+- **Self-updating from the project's GitHub releases.** ExcelScry asks the
+  latest release for its update manifest when it starts and offers a newer
+  version in the status bar; **Settings › Updates** shows the running version,
+  the release manifest, a manual check and the install button. Nothing is
+  downloaded until it is asked for, the installer is verified against the
+  release signing key before anything runs, and it must have been signed for the
+  version the manifest named — so a rewritten manifest cannot point the app at
+  an older, validly signed release. A failed check stays quiet at start-up; a
+  failed verification is reported and changes nothing.
+
+### Fixed
+
+- **The Windows integration dialog lists every extension ExcelScry registers,
+  `.xlsm` included.** It asked the backend for a `.xlsx` handler and an `.xls`
+  handler — fields that never existed — so both rows always read *no handler
+  recorded* while the registry said otherwise, and macro-enabled workbooks,
+  which are registered exactly like the other two, were not mentioned at all.
+  The rows are now built from the registration table, so the dialog cannot fall
+  behind what the app actually registers.
+
 ## [0.1.0] - 2026-10-16
 
 First release: a read-only viewer for Excel workbooks and OpenDocument

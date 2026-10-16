@@ -120,6 +120,11 @@
           <span class="trust-dot" aria-hidden="true"></span>
           <span id="trust-badge-text"></span>
         </button>
+        <!-- Appears only when the release manifest announces a newer version. -->
+        <button class="update-pill" id="update-pill" type="button" hidden>
+          <span class="update-dot" aria-hidden="true"></span>
+          <span id="update-pill-text"></span>
+        </button>
         <span class="status-sep">•</span>
         <span class="status-dim" id="status-sheet">—</span>
         <span class="toolbar-spacer"></span>
@@ -134,7 +139,7 @@
       <div class="modal-backdrop" data-close="1"></div>
       <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="settings-title">
         <header class="modal-head">
-          <h2 id="settings-title">Windows integration</h2>
+          <h2 id="settings-title">Settings</h2>
           <button class="btn btn-icon" id="btn-settings-close" type="button" aria-label="Close">
             <svg viewBox="0 0 24 24" class="icon" aria-hidden="true">
               <path
@@ -145,18 +150,15 @@
         </header>
 
         <div class="modal-body">
+          <h3 class="section-title">Windows integration</h3>
           <dl class="facts" id="assoc-facts">
             <div><dt>Executable</dt><dd id="fact-exe">—</dd></div>
             <div><dt>Registered for this user</dt><dd id="fact-user">—</dd></div>
             <div><dt>Registered for all users</dt><dd id="fact-machine">—</dd></div>
-            <div>
-              <dt>Currently opens .xlsx</dt>
-              <dd id="fact-xlsx">—</dd>
-            </div>
-            <div>
-              <dt>Currently opens .xls</dt>
-              <dd id="fact-xls">—</dd>
-            </div>
+            <!-- One row per extension ExcelScry registers — .xlsx, .xlsm and
+                 .xls today — is appended here by renderExtensionFacts(), so the
+                 list follows the registration table rather than a copy of it in
+                 the markup. -->
           </dl>
 
           <p class="hint" id="assoc-note"></p>
@@ -176,7 +178,7 @@
             <p>
               Installing the <strong>Scry Excel File</strong> context-menu entry works directly, and
               the installer does that for you. Becoming the program that
-              <em>opens</em> .xlsx and .xls by default is different: since Windows 8 the choice is
+              <em>opens</em> .xlsx, .xlsm and .xls by default is different: since Windows 8 the choice is
               stored in a hash-protected <code>UserChoice</code> key that only Windows itself may
               write. An installer that fakes it is silently ignored, so ExcelScry registers itself
               as a candidate and hands you the one-click confirmation in
@@ -187,6 +189,25 @@
               <strong>Show more options</strong> (Shift+F10).
             </p>
           </section>
+
+          <h3 class="section-title">Updates</h3>
+          <dl class="facts" id="update-facts">
+            <div><dt>This build</dt><dd id="fact-version">—</dd></div>
+            <div><dt>Release manifest</dt><dd id="fact-update">—</dd></div>
+          </dl>
+
+          <p class="hint" id="update-note">
+            ExcelScry asks the latest GitHub release for its manifest when it starts, and offers a
+            newer version in the status bar. Nothing is downloaded until you ask for it, and what
+            is downloaded has to match the release signature before it is installed.
+          </p>
+
+          <div class="modal-actions">
+            <button class="btn" id="btn-check-updates" type="button">Check for updates</button>
+            <button class="btn btn-primary" id="btn-install-update" type="button" hidden>
+              Install update
+            </button>
+          </div>
         </div>
       </div>
     </div>

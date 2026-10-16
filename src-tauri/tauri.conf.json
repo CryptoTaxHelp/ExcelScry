@@ -56,6 +56,19 @@
         "installerHooks": "./windows/hooks.nsh",
         "compression": "lzma"
       }
+    },
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/CryptoTaxHelp/ExcelScry/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQyRTkyRDRDQjM1RkJCQjcKUldTM3UxK3pUQzNwMHQ2amI5SXp6NWpxSjduM0d1NG1pcVdSeWlQRVpwKzNFRnp6NGFGTjZqcTMK",
+      "requireSignedVersion": true,
+      "windows": {
+        "installMode": "passive"
+      }
     }
   }
 }

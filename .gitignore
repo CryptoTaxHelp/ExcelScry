@@ -21,6 +21,11 @@ __pycache__/
 # Freebuff local project metadata
 .freebuff/
 
+# The updater signing key belongs outside the repository (~/.tauri/ExcelScry.key)
+# and in a GitHub secret, never here. This is the belt to that pair of braces:
+# its public half is meant to be committed, the private half never.
+*.key
+
 # Editor / OS noise
 .DS_Store
 Thumbs.db

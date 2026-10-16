@@ -623,6 +623,56 @@ body {
   background: var(--amber);
 }
 
+/* The update offer, which shares the badge's shape so the status bar keeps one
+   visual language — but in the accent colour, because it is an offer rather
+   than a warning. It only exists while there is something to install. */
+.update-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  /* Like the badge: never the thing that gives when the bar is tight. */
+  flex: 0 0 auto;
+  padding: 1px 9px;
+  border: 1px solid #1d5f83;
+  border-radius: 999px;
+  background: #08222f;
+  color: var(--accent);
+  font: inherit;
+  font-size: 11px;
+  line-height: 16px;
+  cursor: pointer;
+}
+.update-pill:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: #dff3ff;
+}
+.update-pill:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+.update-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+/* Groups inside a modal, above their own facts list. */
+.section-title {
+  margin: 0 0 10px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+/* A group that follows prose already separates itself; the heading only needs
+   the same breathing room the prose sections give each other. */
+.explain + .section-title {
+  margin-top: 18px;
+}
+
 #trust-badge-text {
   overflow: hidden;
   text-overflow: ellipsis;

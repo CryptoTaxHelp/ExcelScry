@@ -96,6 +96,14 @@ This is the command behind `scripts/build.sh` (bash) and `scripts/build.ps1`
 ./scripts/build.sh          # or:  powershell -File scripts/build.ps1
 ```
 
+Both scripts insist on the **updater signing key**: `createUpdaterArtifacts`
+is on, so every build signs its own updater artifact and the bundler refuses to
+produce one without the private half of the key in `tauri.conf.json`. The
+scripts take `TAURI_SIGNING_PRIVATE_KEY` from the environment (which is how CI
+passes the repository secret) or fall back to `~/.tauri/ExcelScry.key`, and stop
+with a pointer to [Updates](#updates) when neither is there. A build is either
+signed or it fails — never quietly unsigned.
+
 ### Outputs
 
 | Artifact | Path |
@@ -141,9 +149,11 @@ So ExcelScry does the honest version of it:
 2. It writes the legacy `Software\Classes\.xlsx` default, which Windows *does*
    honour on a profile with no `UserChoice` yet — after backing up the previous
    value, so uninstalling restores it.
-3. The **Windows integration** dialog (the gear button) shows the current state
-   and offers *Make ExcelScry the default…*, which opens the Default Apps page
-   pre-filtered to ExcelScry for the one-click confirmation.
+3. The **Windows integration** dialog (the gear button) shows the current state —
+   the executable, whether the registration is per-user or per-machine, and what
+   Windows currently opens **each registered extension** with (`.xlsx`, `.xlsm`
+   and `.xls`) — and offers *Make ExcelScry the default…*, which opens the
+   Default Apps page pre-filtered to ExcelScry for the one-click confirmation.
 
 On Windows 11 the new context menu is collapsed; the entry appears under
 **Show more options** (or `Shift+F10`).
@@ -168,6 +178,74 @@ ExcelScry.exe "C:\path\book.xlsx"   # open a workbook straight away
 - Arrow keys, `PageUp`/`PageDown`, `Home`/`End` — move the selection.
 - `Ctrl+C` — copy the selected cell's text.
 
+## Updates
+
+ExcelScry updates itself from its own GitHub releases. At start-up it fetches
+`https://github.com/CryptoTaxHelp/ExcelScry/releases/latest/download/latest.json`
+— the `latest.json` asset `tauri-action` attaches to every release the workflow
+builds — and, if that names a newer version, the status bar offers it as
+**Update to *x.y.z***. Nothing is downloaded until that is clicked. The same
+state lives in **Settings › Updates**: *This build*, *Release manifest*, a
+manual *Check for updates*, and *Install update* when there is one. A start-up
+check that cannot reach GitHub says nothing; a manual one reports the reason.
+
+Installing means: download the installer, verify it, hand it to Windows. The
+verification is the point of the arrangement:
+
+- The manifest's `signature` is a [minisign](https://jedisct1.github.io/minisign/)
+  signature over the installer, checked against the `pubkey` in
+  `src-tauri/tauri.conf.json` **before the installer is allowed to run**. Anyone
+  who can push to this repository can replace an asset; only the holder of the
+  private key can produce an installer those bytes will accept.
+- `requireSignedVersion` is on, so the artifact must also have been signed *for
+  the version the manifest announced*. `tauri build` stamps the version into the
+  signature's trusted comment, and the release job refuses a tag that disagrees
+  with the manifest — so the two numbers agree on every release this app can
+  update from. Without that check, a rewritten manifest could pair a new version
+  number with the signature and URL of an older, genuinely signed release and
+  talk the app into reinstalling it.
+
+A failed download is reported in the status bar and changes nothing: the
+signature mismatch, the version mismatch and the unsigned case each have their
+own sentence. On Windows the installer is a per-machine NSIS package, so
+finishing an update means the usual elevation prompt; it shows a progress bar
+(`installMode: "passive"`), closes the running app and starts the new version.
+
+### The signing key
+
+One keypair, generated once:
+
+```bash
+cargo tauri signer generate -w ~/.tauri/ExcelScry.key
+```
+
+- the **public** half is committed as `plugins.updater.pubkey` in
+  [tauri.conf.json](src-tauri/tauri.conf.json);
+- the **private** half lives outside the repository (`~/.tauri/ExcelScry.key`,
+  and `*.key` is gitignored as a second line of defence) and in the
+  `TAURI_SIGNING_PRIVATE_KEY` **repository secret** that the release and
+  installer jobs read. It was generated with an empty password, so no
+  `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` is needed; set both if that ever changes.
+
+Rotate by generating a new keypair and committing the new public key **only
+along with a release signed by the new private key**: an app that has the old
+public key cannot update to a build signed with a new one, so a rotation needs
+one release signed by the key the installed version already trusts.
+
+### What a release has to carry
+
+The updater works from the first release built by this workflow; a release
+published before it has no `latest.json`, so the endpoint answers 404 and the
+start-up check stays quiet by design. The release job sets
+`uploadUpdaterJson: true` (plus `uploadUpdaterSignatures`, and
+`updaterJsonPreferNsis: true` because the manifest is built from the NSIS
+`.sig`), which is what puts these two assets on the release page:
+
+| Asset | What the updater does with it |
+|---|---|
+| `latest.json` | `version`, `notes`, `pub_date` and a `platforms` map keyed `windows-x86_64` (and `windows-x86_64-nsis`) |
+| `*.exe.sig` | the signature `latest.json` embeds for that platform |
+
 ## Repository layout
 
 ```
@@ -178,6 +256,7 @@ src-tauri/src/
   workbook.rs           reading via calamine, absolute-coordinate normalisation
   ods_export.rs         writing ODS via spreadsheet-ods
   trust.rs              package inspection: macros, links, connections, objects
+  update.rs             update check and install, on tauri-plugin-updater
   associations.rs       Windows registry contract for the shell integration
   windows/hooks.nsh     NSIS installer hooks (context menu, associations)
 scripts/
@@ -280,7 +359,10 @@ and neither should be changed without the other.
 [`tauri-apps/tauri-action`](https://github.com/tauri-apps/tauri-action), then
 uploads the executables and bundles as a workflow artifact. It passes no
 `tagName` or `releaseId`, so nothing is published and no repository write is
-needed. Two things that are deliberately absent:
+needed, and no updater files are uploaded — there is no release for them to
+belong to. It does pass `TAURI_SIGNING_PRIVATE_KEY` from the repository secret,
+because the build signs its updater artifact whether or not anyone publishes it.
+Two things that are deliberately absent:
 
 - **no Node/npm setup** — the front end is static files that `frontendDist`
   points straight at, and there is no `beforeBuildCommand` to run;
@@ -292,8 +374,10 @@ needed. Two things that are deliberately absent:
 repository. It checks that the tag names the version in the manifest, builds the
 portable executable and the installer, and has `tauri-action` create the GitHub
 Release with both attached — body from `scripts/release_notes.py`, with GitHub's
-own generated notes appended. The `installer` job skips tag pushes, so a tag is
-built once rather than twice.
+own generated notes appended. Alongside them it uploads the two files the
+updater reads, `latest.json` and the installer's `.sig`, both built from the same
+signed build. The `installer` job skips tag pushes, so a tag is built once
+rather than twice.
 
 ## Releasing
 
@@ -313,6 +397,11 @@ python scripts/bump_version.py 0.2.0        # write every copy at once
 manifest — a release tag has to match the build it points at. After a bump,
 `cargo metadata --manifest-path src-tauri/Cargo.toml --locked` should succeed;
 it fails if the lock was left behind.
+
+The `TAURI_SIGNING_PRIVATE_KEY` repository secret has to hold the private half
+of the key in `tauri.conf.json` ([Updates](#updates) describes the pair). Without
+it the release job fails rather than publishing an installer no installed copy
+of the app would accept.
 
 Then, in order:
 
@@ -353,3 +442,9 @@ Then, in order:
   rather than a partial view.
 - Password-protected workbooks are not supported; the error says so.
 - Exports are value-only; the ODS file contains no formulas.
+- **Updates only exist from the first release built by the workflow**, and only
+  for a strictly newer version. Installed copies of an older, pre-updater
+  release cannot update themselves; they have to be replaced by hand once.
+- The update check is a single request to the `releases/latest/download` URL
+  with no retry and no background polling: a machine that is offline at start-up
+  simply does not offer the update until the next launch or a manual check.
