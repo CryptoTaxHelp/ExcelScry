@@ -1,6 +1,6 @@
 [package]
 name = "ExcelScry"
-version = "0.3.1"
+version = "0.3.2"
 description = "ExcelScry - a fast Excel and OpenDocument spreadsheet viewer"
 authors = ["ExcelScry"]
 edition = "2021"

@@ -9,6 +9,8 @@ those entries into a version section and tags the commit that holds it.
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-10-19
+
 ### Fixed
 
 - **Verifying a published release reads the manifest it is handed.** The
