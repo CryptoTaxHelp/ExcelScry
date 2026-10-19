@@ -266,6 +266,7 @@ mod tests {
                 name: "Report".into(),
                 rows,
                 cols: 4,
+                formats: Default::default(),
             }],
             truncated: false,
             total_cells: 20,

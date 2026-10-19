@@ -6,7 +6,10 @@
 
 use chrono::{Duration, NaiveDateTime, NaiveTime};
 use serde::Serialize;
+use std::collections::HashMap;
+use std::sync::Arc;
 
+use crate::number_format::NumberFormat;
 use crate::trust::TrustReport;
 
 /// A single cell, preserving enough type information to export faithfully.
@@ -119,6 +122,35 @@ fn format_duration(d: &Duration) -> String {
     }
 }
 
+/// The formats of the cells that carry one, keyed by absolute position.
+///
+/// Sparse on purpose: most cells in a sheet use `General`, and this should
+/// cost memory in proportion to the cells that actually have a format rather
+/// than eight bytes for every cell in the file.
+#[derive(Debug, Clone, Default)]
+pub struct SheetFormats {
+    cells: HashMap<u64, Arc<NumberFormat>>,
+}
+
+/// Absolute row and column packed into one key (both fit in 32 bits).
+fn cell_key(row: usize, col: usize) -> u64 {
+    ((row as u64) << 32) | col as u64
+}
+
+impl SheetFormats {
+    pub fn insert(&mut self, row: usize, col: usize, format: Arc<NumberFormat>) {
+        self.cells.insert(cell_key(row, col), format);
+    }
+
+    pub fn get(&self, row: usize, col: usize) -> Option<&NumberFormat> {
+        self.cells.get(&cell_key(row, col)).map(|f| f.as_ref())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.cells.is_empty()
+    }
+}
+
 /// One worksheet, stored as a dense row table addressed by *absolute* row
 /// index (row 0 is spreadsheet row 1) with each row trimmed to its last
 /// non-empty column.
@@ -128,6 +160,8 @@ pub struct SheetData {
     pub rows: Vec<Vec<Cell>>,
     /// Widest row, i.e. the absolute column count.
     pub cols: usize,
+    /// How each formatted cell should be displayed; `General` cells are absent.
+    pub formats: SheetFormats,
 }
 
 impl SheetData {
@@ -267,7 +301,15 @@ impl LoadedWorkbook {
                 if cell.is_empty() {
                     out.push(None);
                 } else {
-                    out.push(Some((cell.kind().to_string(), cell.display())));
+                    // The sheet's own format decides the text; a format that
+                    // refuses the value (a 17-digit integer, a boolean) falls
+                    // back to the plain rendering rather than to nothing.
+                    let text = sd
+                        .formats
+                        .get(r, c)
+                        .and_then(|f| f.render(cell))
+                        .unwrap_or_else(|| cell.display());
+                    out.push(Some((cell.kind().to_string(), text)));
                 }
             }
             rows.push(out);

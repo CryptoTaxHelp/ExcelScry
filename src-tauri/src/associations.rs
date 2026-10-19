@@ -22,6 +22,11 @@
 //! read as plain data: nothing in ExcelScry executes or extracts the VBA
 //! project, which makes it a safe way to look inside a workbook from an
 //! untrusted source.
+//!
+//! OpenDocument spreadsheets (`.ods`) are registered too, and not only because
+//! ExcelScry can write them: an `.ods` is read by the same viewer as an `.xlsx`,
+//! so a spreadsheet from LibreOffice or Google Sheets gets the context menu and
+//! the Default Apps entry that any Excel workbook gets.
 
 use std::path::Path;
 
@@ -40,8 +45,8 @@ const BACKUP_PATH: &str = "Software\\ExcelScry\\Backup";
 /// Extensions that get a ProgID, a context-menu verb and a Default Apps entry.
 ///
 /// `(extension, ProgID, description)`. The app can *open* more formats than
-/// this (`.xlsb`, `.ods`); these are the ones registered with the shell. Add a
-/// row here — and a matching pair of `!insertmacro` lines in
+/// this (`.xlsb`, `.xla`); these are the ones registered with the shell. Add a
+/// row here — and a matching block plus a pair of `!insertmacro` lines in
 /// `windows/hooks.nsh` — to extend it.
 pub const EXTENSIONS: &[(&str, &str, &str)] = &[
     (".xlsx", "ExcelScry.xlsx", "ExcelScry Worksheet"),
@@ -53,6 +58,13 @@ pub const EXTENSIONS: &[(&str, &str, &str)] = &[
         "ExcelScry Macro-Enabled Workbook",
     ),
     (".xls", "ExcelScry.xls", "ExcelScry 97-2003 Worksheet"),
+    // OpenDocument spreadsheets are viewable here, not just exportable: an
+    // `.ods` from LibreOffice or Google Sheets opens in the same grid.
+    (
+        ".ods",
+        "ExcelScry.ods",
+        "ExcelScry OpenDocument Spreadsheet",
+    ),
 ];
 
 /// A single registry mutation, kept as data so the contract can be unit-tested
@@ -141,7 +153,7 @@ pub fn register_ops(exe: &str) -> Vec<RegOp> {
     ops.push(op_set(
         CAPABILITIES_PATH,
         "ApplicationDescription",
-        "ExcelScry - view XLS and XLSX spreadsheets, export to ODS",
+        "ExcelScry - view Excel and OpenDocument spreadsheets",
     ));
     ops.push(op_set(
         "Software\\RegisteredApplications",
@@ -683,6 +695,90 @@ mod tests {
     }
 
     #[test]
+    fn opendocument_spreadsheets_get_the_same_shell_integration() {
+        // `.ods` is a format ExcelScry reads, not just one it writes, so it has
+        // to reach the context menu and Default Apps like an Excel workbook.
+        let ops = register_ops("C:\\Apps\\ExcelScry.exe");
+        let verb = "Software\\Classes\\SystemFileAssociations\\.ods\\shell\\ScryExcelFile";
+        assert!(
+            ops.iter()
+                .any(|op| matches!(op, RegOp::SetString { key, name, value }
+                if key == verb && name.is_empty() && value == "Scry Excel File")),
+            ".ods does not get the context-menu verb"
+        );
+        assert!(
+            ops.iter()
+                .any(|op| matches!(op, RegOp::SetString { key, name, .. }
+                if *key == format!("{verb}\\command") && name.is_empty())),
+            ".ods verb has no command"
+        );
+        assert!(
+            ops.iter()
+                .any(|op| matches!(op, RegOp::SetNone { key, name }
+                if *key == "Software\\Classes\\.ods\\OpenWithProgids" && name == "ExcelScry.ods")),
+            ".ods is not advertised as a handler"
+        );
+        assert!(
+            ops.iter()
+                .any(|op| matches!(op, RegOp::SetString { key, name, .. }
+                if *key == format!("{CAPABILITIES_PATH}\\FileAssociations") && name == ".ods")),
+            ".ods has no Default Apps capability"
+        );
+        assert!(
+            ops.iter()
+                .any(|op| matches!(op, RegOp::SetString { key, name, value }
+                if key == "Software\\Classes\\ExcelScry.ods" && name.is_empty()
+                    && value == "ExcelScry OpenDocument Spreadsheet")),
+            ".ods has no ProgID description"
+        );
+    }
+
+    #[test]
+    fn the_nsis_hooks_write_the_same_contract_as_the_runtime() {
+        // The installer and the portable build register the shell integration
+        // through two different mechanisms, and nothing compiles one against
+        // the other. A format added to EXTENSIONS and forgotten in hooks.nsh
+        // would be registered for portable installs and invisible to installed
+        // ones, so the two are compared here.
+        let script = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("windows")
+                .join("hooks.nsh"),
+        )
+        .expect("windows/hooks.nsh should be readable");
+
+        for (ext, progid, description) in EXTENSIONS {
+            assert!(
+                script.contains(&format!("\"{ext}\"")),
+                "hooks.nsh does not mention {ext}"
+            );
+            assert!(
+                script.contains(&format!("\"{progid}\"")),
+                "hooks.nsh does not register the {progid} ProgID"
+            );
+            assert!(
+                script.contains(&format!("\"{description}\"")),
+                "hooks.nsh does not describe {ext} as {description}"
+            );
+        }
+
+        let associates = script.matches("!insertmacro ScryAssociate ").count();
+        let disassociates = script.matches("!insertmacro ScryDisassociate ").count();
+        assert_eq!(
+            associates,
+            EXTENSIONS.len(),
+            "hooks.nsh registers {associates} extensions, the runtime knows {}",
+            EXTENSIONS.len()
+        );
+        assert_eq!(
+            disassociates,
+            EXTENSIONS.len(),
+            "hooks.nsh unregisters {disassociates} extensions, the runtime knows {}",
+            EXTENSIONS.len()
+        );
+    }
+
+    #[test]
     fn every_registered_extension_has_a_distinct_progid() {
         let mut progids: Vec<&str> = EXTENSIONS.iter().map(|(_, p, _)| *p).collect();
         progids.sort_unstable();
@@ -692,6 +788,10 @@ mod tests {
         assert!(
             EXTENSIONS.iter().any(|(ext, _, _)| *ext == ".xlsm"),
             "macro-enabled workbooks are not in the registration list"
+        );
+        assert!(
+            EXTENSIONS.iter().any(|(ext, _, _)| *ext == ".ods"),
+            "OpenDocument spreadsheets are not in the registration list"
         );
     }
 

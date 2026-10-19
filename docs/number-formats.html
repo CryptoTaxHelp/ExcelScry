@@ -1,0 +1,32 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>ExcelScry — rendering a sheet's number formats</title>
+<style>
+  body { margin: 0; background: #1b1d22; color: #c9cdd6;
+         font: 14px/1.5 Segoe UI, system-ui, sans-serif; }
+  figure { margin: 0; }
+  figure + figure { border-top: 1px solid #2c303a; }
+  img { display: block; width: 100%; height: auto; }
+  figcaption { padding: 12px 16px; }
+  code { color: #8fd3ff; }
+</style>
+<figure>
+  <img src="xlsx-formats.png" alt="ExcelScry showing an Excel workbook with money, date, time and percentage formats">
+  <figcaption>
+    <code>samples/ExcelScry-sample.xlsx</code> — the money columns read
+    <strong>$23,988.00</strong>, the ordered column <strong>15/01/2026</strong>,
+    the times <strong>09:30</strong> and the margin <strong>35.0%</strong>,
+    because each cell carries its own <code>numFmt</code> in
+    <code>xl/styles.xml</code>.
+  </figcaption>
+</figure>
+<figure>
+  <img src="ods-verification.png" alt="ExcelScry showing an OpenDocument spreadsheet with the same money, date, time and percentage formats">
+  <figcaption>
+    <code>samples/ExcelScry-sample.ods</code> — the same columns, formatted by
+    the package's own <code>number:currency-style</code>,
+    <code>number:date-style</code>, <code>number:time-style</code> and
+    <code>number:percentage-style</code> definitions and the cell styles that
+    point at them.
+  </figcaption>
+</figure>

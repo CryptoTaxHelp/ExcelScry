@@ -57,7 +57,7 @@ mkdir -p dist/ExcelScry-portable
 cp "$BIN" dist/ExcelScry-portable/ExcelScry.exe
 cp README.md dist/ExcelScry-portable/README.md
 mkdir -p dist/ExcelScry-portable/samples
-cp samples/*.xlsx samples/*.xlsm dist/ExcelScry-portable/samples/ 2>/dev/null || true
+cp samples/*.xlsx samples/*.xlsm samples/*.ods dist/ExcelScry-portable/samples/ 2>/dev/null || true
 cp "$SETUP" "dist/ExcelScry-${VERSION}-setup.exe"
 
 echo

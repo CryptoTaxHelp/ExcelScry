@@ -5,7 +5,9 @@ several sheets, a table that does not start at A1, a time-of-day column
 (Excel stores those as a fraction of a day, which renders as a bogus 1899 date
 if you are not careful), an integer too large for a float, a blank row inside
 the used range, markup-looking text, and sheets that are wider and taller than
-the viewport.
+the viewport. The money, date and percentage columns carry their own number
+formats, so the grid has to show `$23,988.00`, `15/01/2026` and `35.0%` rather
+than the raw values.
 
 Run from the repository root:  python scripts/make_sample.py
 """
@@ -57,13 +59,30 @@ def add_report(book: Workbook) -> None:
         for c, value in enumerate(row):
             ws.cell(row=first_row + 1 + r, column=first_col + c, value=value)
 
-    # Times of day. These land in the viewer as 09:30:00, not 1899-12-30.
+    # Times of day and a margin, in their own columns.
     shift_col = first_col + len(headers) + 1
     ws.cell(row=first_row, column=shift_col, value="Start time").font = Font(bold=True)
-    for r, value in enumerate([dt.time(9, 30), dt.time(13, 5, 15), dt.time(23, 59, 59)]):
+    ws.cell(row=first_row, column=shift_col + 1, value="Margin").font = Font(bold=True)
+    times = [dt.time(9, 30), dt.time(13, 5, 15), dt.time(23, 59, 59)]
+    for r, value in enumerate(times):
         ws.cell(row=first_row + 1 + r, column=shift_col, value=value)
+    for r, margin in enumerate((0.35, 0.28, 0.0, 0.42, 0.6, 0.15, 0.2, 0.3)):
+        ws.cell(row=first_row + 1 + r, column=shift_col + 1, value=margin)
 
-    for column, width in zip("CDEFGHI", (10, 12, 8, 11, 12, 12, 18)):
+    # The formats Excel/Sheets would write. Without them the viewer would show
+    # 23988, 46037 and 0.35 where the sheet shows $23,988.00, 15/01/2026 and
+    # 35.0%.
+    for r in range(first_row + 1, first_row + 1 + len(rows)):
+        ws.cell(row=r, column=first_col + 2).number_format = "#,##0"
+        ws.cell(row=r, column=first_col + 3).number_format = '"$"#,##0.00'
+        ws.cell(row=r, column=first_col + 4).number_format = '"$"#,##0.00'
+        ws.cell(row=r, column=first_col + 5).number_format = "dd/mm/yyyy"
+    for r in range(first_row + 1, first_row + 1 + len(times)):
+        ws.cell(row=r, column=shift_col).number_format = "hh:mm"
+    for r in range(first_row + 1, first_row + 9):
+        ws.cell(row=r, column=shift_col + 1).number_format = "0.0%"
+
+    for column, width in zip("CDEFGHIJK", (10, 12, 8, 11, 12, 12, 18, 11, 9)):
         ws.column_dimensions[column].width = width
 
 

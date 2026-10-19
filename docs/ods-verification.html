@@ -1,0 +1,25 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>ExcelScry — viewing an OpenDocument spreadsheet</title>
+<style>
+  body { margin: 0; background: #1b1d22; color: #c9cdd6;
+         font: 14px/1.5 Segoe UI, system-ui, sans-serif; }
+  figure { margin: 0; }
+  img { display: block; width: 100%; height: auto; }
+  figcaption { padding: 12px 16px; }
+  code { color: #8fd3ff; }
+</style>
+<figure>
+  <img src="ods-verification.png" alt="ExcelScry showing an OpenDocument spreadsheet">
+  <figcaption>
+    ExcelScry opening <code>samples/ExcelScry-sample.ods</code>, written as plain
+    ODF XML by <code>scripts/make_ods_sample.py</code> rather than by this app's
+    own exporter. The status bar reads <strong>OpenDocument (ods)</strong>; the
+    table keeps its <code>C6</code> offset and its blank row, the
+    <code>office:time-value</code> column shows clock times (<code>09:30</code>,
+    not <code>PT09H30M00S</code>), the boolean renders as <code>TRUE</code>, the
+    markup-looking note is shown as text, and each column is rendered through
+    the package's own <code>number:*</code> style — grouped units, dollar
+    amounts, <code>dd/mm/yyyy</code> dates and a <code>0.0%</code> margin.
+  </figcaption>
+</figure>

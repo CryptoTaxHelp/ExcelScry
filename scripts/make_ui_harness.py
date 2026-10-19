@@ -27,9 +27,17 @@ MOCK = r"""
 
 const LOREM = "a very long value that should be clipped in the grid but shown in full in the readout";
 
+// The backend renders a cell through its number format, so the strings the
+// grid receives are already display-ready: `$23,988.00`, `15/01/2026`, `35.0%`.
+function group(value) {
+  const [whole, fraction] = String(value).split(".");
+  const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  return fraction ? `${grouped}.${fraction}` : grouped;
+}
+
 function salesCell(r, c) {
   if (r === 5) {
-    const h = ["Region", "Product", "Units", "Unit price", "Revenue", "Ordered", "Notes"][c - 2];
+    const h = ["Region", "Product", "Units", "Unit price", "Revenue", "Ordered", "Notes", "Margin", "Start time"][c - 2];
     return h ? ["s", h] : null;
   }
   if (r >= 6 && r <= 25) {
@@ -37,12 +45,13 @@ function salesCell(r, c) {
     switch (c) {
       case 2: return ["s", regions[r % 4]];
       case 3: return ["s", r % 2 ? "Widget" : "Gadget"];
-      case 4: return ["i", String(r * 137)];
-      case 5: return ["f", "19.99"];
-      case 6: return ["f", String((r * 137 * 19.99).toFixed(2))];
-      case 7: return ["d", `2026-0${(r % 9) + 1}-1${r % 10}`];
+      case 4: return ["i", group(r * 137)];
+      case 5: return ["f", "$19.99"];
+      case 6: return ["f", "$" + group((r * 137 * 19.99).toFixed(2))];
+      case 7: return ["d", `1${r % 10}/0${(r % 9) + 1}/2026`];
       case 8: return r === 9 ? ["e", "#N/A upstream"] : ["s", "note " + r];
-      case 10: return ["t", `0${r % 9 + 1}:3${r % 6}:00`];
+      case 9: return ["f", `${(20 + (r % 30)).toFixed(1)}%`];
+      case 10: return ["t", `0${r % 9 + 1}:3${r % 6}`];
       default: return null;
     }
   }
@@ -228,8 +237,8 @@ const HANDLERS = {
     userRegistered: false,
     machineRegistered: true,
     // One entry per extension the app registers, in registration order. The
-    // dialog renders whatever is here, so a fourth format would need no change
-    // on the front end.
+    // dialog renders whatever is here, so a format added to the Rust side
+    // needs no change on the front end.
     extensions: [
       {
         ext: ".xlsx",
@@ -252,6 +261,14 @@ const HANDLERS = {
         progid: "ExcelScry.xls",
         currentHandler: "ExcelScry.xls",
         isDefault: true,
+        registeredForUser: false,
+        registeredMachine: true,
+      },
+      {
+        ext: ".ods",
+        progid: "ExcelScry.ods",
+        currentHandler: "OpenDocument.Spreadsheet.1",
+        isDefault: false,
         registeredForUser: false,
         registeredMachine: true,
       },

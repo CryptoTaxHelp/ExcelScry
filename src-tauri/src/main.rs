@@ -3,9 +3,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod associations;
+mod cell_styles;
 mod manifest;
 mod model;
+mod number_format;
 mod ods_export;
+mod text_table;
 mod trust;
 mod update;
 mod workbook;
@@ -69,9 +72,12 @@ async fn pick_workbook(app: tauri::AppHandle) -> Result<Option<String>, String> 
         .set_title("Open a spreadsheet")
         .add_filter(
             "Spreadsheets",
-            &["xlsx", "xlsm", "xlsb", "xls", "xla", "ods"],
+            &[
+                "xlsx", "xlsm", "xlsb", "xls", "xla", "ods", "csv", "tsv", "tab",
+            ],
         )
         .add_filter("Excel workbook", &["xlsx", "xlsm", "xls"])
+        .add_filter("Text tables", &["csv", "tsv", "tab"])
         .blocking_pick_file();
 
     match picked {

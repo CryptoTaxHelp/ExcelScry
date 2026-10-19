@@ -2,7 +2,9 @@
 ;  ExcelScry - NSIS installer hooks
 ;
 ;  Adds the "Scry Excel File" context-menu verb, registers the ExcelScry
-;  ProgIDs, and advertises the app to Windows' Default Apps page.
+;  ProgIDs, and advertises the app to Windows' Default Apps page. Excel
+;  workbooks and OpenDocument spreadsheets both qualify: an `.ods` opens in the
+;  same viewer.
 ;
 ;  This file is included by Tauri's generated installer. The four hook macros
 ;  below are the supported insertion points.
@@ -50,6 +52,12 @@
 !define SCRY_EXT3 ".xls"
 !define SCRY_PROGID3 "ExcelScry.xls"
 !define SCRY_DESC3 "ExcelScry 97-2003 Worksheet"
+
+; OpenDocument spreadsheets are readable, not only exportable, so they get the
+; same context menu and Default Apps entry as the Excel formats.
+!define SCRY_EXT4 ".ods"
+!define SCRY_PROGID4 "ExcelScry.ods"
+!define SCRY_DESC4 "ExcelScry OpenDocument Spreadsheet"
 
 ; Tell Explorer that associations changed, so an already-running Explorer
 ; stops serving a stale context menu.
@@ -137,9 +145,10 @@
   !insertmacro ScryAssociate ${ROOT} "${SCRY_EXT1}" "${SCRY_PROGID1}" "${SCRY_DESC1}"
   !insertmacro ScryAssociate ${ROOT} "${SCRY_EXT2}" "${SCRY_PROGID2}" "${SCRY_DESC2}"
   !insertmacro ScryAssociate ${ROOT} "${SCRY_EXT3}" "${SCRY_PROGID3}" "${SCRY_DESC3}"
+  !insertmacro ScryAssociate ${ROOT} "${SCRY_EXT4}" "${SCRY_PROGID4}" "${SCRY_DESC4}"
 
   WriteRegStr ${ROOT} "${SCRY_CAPABILITIES}" "ApplicationName" "${SCRY_APP_NAME}"
-  WriteRegStr ${ROOT} "${SCRY_CAPABILITIES}" "ApplicationDescription" "ExcelScry - view XLS and XLSX spreadsheets, export to ODS"
+  WriteRegStr ${ROOT} "${SCRY_CAPABILITIES}" "ApplicationDescription" "ExcelScry - view Excel and OpenDocument spreadsheets"
   WriteRegStr ${ROOT} "Software\RegisteredApplications" "${SCRY_APP_NAME}" "${SCRY_CAPABILITIES}"
 !macroend
 
@@ -147,6 +156,7 @@
   !insertmacro ScryDisassociate ${ROOT} "${SCRY_EXT1}" "${SCRY_PROGID1}"
   !insertmacro ScryDisassociate ${ROOT} "${SCRY_EXT2}" "${SCRY_PROGID2}"
   !insertmacro ScryDisassociate ${ROOT} "${SCRY_EXT3}" "${SCRY_PROGID3}"
+  !insertmacro ScryDisassociate ${ROOT} "${SCRY_EXT4}" "${SCRY_PROGID4}"
   DeleteRegValue ${ROOT} "Software\RegisteredApplications" "${SCRY_APP_NAME}"
   ; Removes Capabilities together with any leftover backup state.
   DeleteRegKey ${ROOT} "Software\ExcelScry"

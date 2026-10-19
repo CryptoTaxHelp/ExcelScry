@@ -2,15 +2,19 @@
 //!
 //! Everything calamine can open is accepted: `xlsx`, `xlsm`, `xlsb`, `xls`,
 //! `xla` and `ods`. Cells are lifted into [`Cell`]s addressed by *absolute*
-//! row/column so the grid matches what Excel would show.
+//! row/column so the grid matches what Excel would show. Delimited text files
+//! (`.csv`, `.tsv`) are not a package at all and go to [`crate::text_table`],
+//! which builds the same shape out of records.
 
 use std::fs;
 use std::path::Path;
 
 use calamine::{open_workbook_auto, Data, Error as CalamineError, Reader};
-use chrono::NaiveTime;
+use chrono::{Duration, NaiveTime};
 
+use crate::cell_styles;
 use crate::model::{Cell, LoadedWorkbook, SheetData};
+use crate::text_table;
 use crate::trust::{self, TrustReport};
 
 /// Upper bound on materialised cells (including sparse padding), so a
@@ -33,10 +37,19 @@ pub fn load(path: &Path) -> Result<LoadedWorkbook, String> {
         ));
     }
 
+    // A delimited file is not a zip, an OLE2 file or anything else calamine
+    // reads; it is text, and it becomes the same cell model a sheet would.
+    if let Some(kind) = text_table::kind_of(path) {
+        return text_table::load(path, &meta, kind);
+    }
+
     let mut book = open_workbook_auto(path).map_err(|e| describe(path, &e))?;
     // Inspect the package before lifting any cells: what a workbook *carries*
     // is worth knowing even before it is read, and it never blocks the open.
     let trust = TrustReport::new(trust::inspect(path, &mut book));
+    // The style tables live outside what the reader exposes, so they are read
+    // separately; a package without them simply renders as it always has.
+    let mut formats = cell_styles::read(path).sheets;
     let names = book.sheet_names();
 
     let mut sheets = Vec::with_capacity(names.len());
@@ -118,6 +131,7 @@ pub fn load(path: &Path) -> Result<LoadedWorkbook, String> {
             name: name.clone(),
             rows,
             cols,
+            formats: formats.remove(name).unwrap_or_default(),
         });
 
         if sheet_truncated {
@@ -127,6 +141,7 @@ pub fn load(path: &Path) -> Result<LoadedWorkbook, String> {
                     name: remaining.clone(),
                     rows: Vec::new(),
                     cols: 0,
+                    formats: Default::default(),
                 });
             }
             break;
@@ -191,16 +206,20 @@ fn convert(data: &Data) -> Cell {
             }
         }
         Data::DateTimeIso(s) => parse_iso(s),
-        Data::DurationIso(s) => Cell::Text(s.clone()),
+        // ODF stores a `time` value as an ISO duration, and calamine hands it
+        // back verbatim. Left as text, a 09:30 cell read `PT09H30M00S` in the
+        // grid; parsed, it is the clock time the sheet actually shows.
+        Data::DurationIso(s) => parse_duration(s).unwrap_or_else(|| Cell::Text(s.clone())),
         Data::Error(e) => Cell::Error(error_label(e)),
     }
 }
 
 /// xlsx can carry dates as ISO strings; keep them as dates when possible.
 ///
-/// This is also where ODS time-of-day cells land: ODF stores a bare time as an
-/// ISO duration, and calamine hands it back as a datetime on Excel's day zero,
-/// so a 09:30 cell would otherwise render as "1899-12-30 09:30:00".
+/// A writer may also emit a time of day as an ISO datetime on Excel's day zero
+/// (`1899-12-30T09:30:00`), which would otherwise render as a bogus 1899 date.
+/// ODF's own `time` values arrive as durations instead; see
+/// [`parse_duration`].
 fn parse_iso(s: &str) -> Cell {
     if let Ok(dt) = s.parse::<chrono::NaiveDateTime>() {
         if is_excel_day_zero(dt.date()) {
@@ -218,6 +237,78 @@ fn parse_iso(s: &str) -> Cell {
         return Cell::Time(t);
     }
     Cell::Text(s.to_string())
+}
+
+/// Parse an ISO 8601 duration, the form ODF uses for a `time` cell.
+///
+/// ODF has no time-of-day type: a bare time is written as a duration shorter
+/// than 24 hours (`PT09H30M00S`). Those are shown as clock times, because that
+/// is what the spreadsheet displays. Anything a day or longer — and anything
+/// negative — is a span, so it keeps the `[h]:mm:ss` rendering that does not
+/// wrap at 24 hours (`PT36H` → `36:00:00`). Returns `None` for anything that
+/// is not a duration, so the caller can keep the original text.
+fn parse_duration(s: &str) -> Option<Cell> {
+    let trimmed = s.trim();
+    let (negative, body) = match trimmed.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, trimmed),
+    };
+    let body = body.strip_prefix('P')?;
+
+    let (day_part, time_part) = match body.split_once('T') {
+        Some((days, time)) => (days, Some(time)),
+        None => (body, None),
+    };
+    // A duration needs at least one component; `P` and `PT` alone are not
+    // durations, and treating them as zero would turn junk into 00:00:00.
+    let mut saw_component = false;
+    let days: f64 = if day_part.is_empty() {
+        0.0
+    } else {
+        saw_component = true;
+        day_part.strip_suffix('D')?.parse().ok()?
+    };
+
+    let mut seconds = 0.0f64;
+    if let Some(time_part) = time_part {
+        let mut number = String::new();
+        for ch in time_part.chars() {
+            match ch {
+                '0'..='9' | '.' => number.push(ch),
+                'H' | 'M' | 'S' => {
+                    if number.is_empty() {
+                        return None;
+                    }
+                    let value: f64 = number.parse().ok()?;
+                    seconds += match ch {
+                        'H' => value * 3600.0,
+                        'M' => value * 60.0,
+                        _ => value,
+                    };
+                    saw_component = true;
+                    number.clear();
+                }
+                _ => return None,
+            }
+        }
+        if !number.is_empty() {
+            return None;
+        }
+    }
+    if !saw_component {
+        return None;
+    }
+
+    let total = (days * 86_400.0 + seconds) * if negative { -1.0 } else { 1.0 };
+    if (0.0..86_400.0).contains(&total) {
+        let whole = total.trunc() as u64;
+        let nanos = ((total - total.trunc()) * 1_000_000_000.0).round() as u32;
+        let time = NaiveTime::from_num_seconds_from_midnight_opt(whole as u32, nanos)?;
+        return Some(Cell::Time(time));
+    }
+    Some(Cell::Duration(Duration::nanoseconds(
+        (total * 1_000_000_000.0).round() as i64,
+    )))
 }
 
 /// Excel's day zero. A "date" of 1899-12-30 can only mean a bare time of day:
@@ -242,7 +333,7 @@ fn error_label(e: &calamine::CellErrorType) -> String {
     .to_string()
 }
 
-const SUPPORTED: &str = "Supported formats: .xlsx, .xlsm, .xlsb, .xls and .ods.";
+const SUPPORTED: &str = "Supported formats: .xlsx, .xlsm, .xlsb, .xls, .ods, .csv and .tsv.";
 
 /// Turn calamine's errors into something a user can act on.
 fn describe(path: &Path, e: &CalamineError) -> String {
@@ -269,7 +360,7 @@ fn describe(path: &Path, e: &CalamineError) -> String {
     }
 }
 
-fn format_label(path: &Path) -> String {
+pub(crate) fn format_label(path: &Path) -> String {
     match path
         .extension()
         .and_then(|e| e.to_str())
@@ -281,6 +372,8 @@ fn format_label(path: &Path) -> String {
         Some("xls") | Some("xla") => "Excel 97-2003 (xls)",
         Some("xlsb") => "Excel Binary (xlsb)",
         Some("ods") => "OpenDocument (ods)",
+        Some("csv") => "Comma-Separated Values (csv)",
+        Some("tsv") | Some("tab") => "Tab-Separated Values (tsv)",
         Some(other) => other,
         None => "spreadsheet",
     }
@@ -332,6 +425,56 @@ mod tests {
     }
 
     #[test]
+    fn ods_time_values_are_clock_times_not_durations() {
+        // A bare time is an ISO duration under 24 hours in ODF.
+        assert_eq!(
+            parse_duration("PT09H30M00S"),
+            Some(Cell::Time(NaiveTime::from_hms_opt(9, 30, 0).unwrap()))
+        );
+        assert_eq!(
+            parse_duration("PT00H00M00S"),
+            Some(Cell::Time(NaiveTime::MIN))
+        );
+        // Fractional seconds survive rather than being rounded away.
+        assert_eq!(
+            parse_duration("PT09H30M00.5S"),
+            Some(Cell::Time(
+                NaiveTime::from_hms_milli_opt(9, 30, 0, 500).unwrap()
+            ))
+        );
+    }
+
+    #[test]
+    fn ods_spans_longer_than_a_day_stay_durations() {
+        // 36 hours must render as 36:00:00, not as a clock time or as text.
+        let cell = parse_duration("PT36H00M00S").expect("a duration");
+        assert_eq!(cell, Cell::Duration(Duration::hours(36)));
+        assert_eq!(cell.display(), "36:00:00");
+
+        // Days are part of the form an ODF writer may use.
+        assert_eq!(
+            parse_duration("P1DT12H"),
+            Some(Cell::Duration(Duration::hours(36)))
+        );
+        assert_eq!(
+            parse_duration("P1D"),
+            Some(Cell::Duration(Duration::hours(24)))
+        );
+        // A negative span keeps its sign instead of becoming a bogus time.
+        assert_eq!(
+            parse_duration("-PT00H01M30S"),
+            Some(Cell::Duration(Duration::seconds(-90)))
+        );
+    }
+
+    #[test]
+    fn anything_that_is_not_a_duration_is_left_as_text() {
+        for value in ["", "9:30", "PT", "PT9", "PT9H30", "tomorrow", "P1Y"] {
+            assert_eq!(parse_duration(value), None, "{value} is not a duration");
+        }
+    }
+
+    #[test]
     fn iso_dates_are_kept_as_dates() {
         let d = chrono::NaiveDate::from_ymd_opt(2026, 10, 15).unwrap();
         assert_eq!(
@@ -347,6 +490,161 @@ mod tests {
     }
 
     #[test]
+    fn an_opendocument_spreadsheet_opens_as_a_workbook() {
+        // The fixture is written by scripts/make_ods_sample.py as plain ODF XML,
+        // not by this crate's exporter, so this reads the package a real
+        // producer (LibreOffice, Google Sheets) would hand the app.
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("samples")
+            .join("ExcelScry-sample.ods");
+        let wb = load(&path).expect("an ods should open");
+
+        assert_eq!(wb.format, "OpenDocument (ods)");
+        assert_eq!(wb.file_name, "ExcelScry-sample.ods");
+        assert!(wb.file_size > 0);
+        assert!(!wb.truncated);
+        assert_eq!(
+            wb.sheets
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Sales report", "Wide sheet"]
+        );
+
+        let sheet = &wb.sheets[0];
+        // The table starts at C6, so the grid has to keep the offset.
+        assert_eq!(sheet.cell(5, 2), &Cell::Text("Region".into()));
+        assert_eq!(sheet.cell(5, 9), &Cell::Text("Start time".into()));
+        assert_eq!(sheet.cell(6, 3), &Cell::Text("Widget".into()));
+        assert_eq!(sheet.cell(6, 4), &Cell::Float(1200.0));
+        assert_eq!(
+            sheet.cell(6, 7),
+            &Cell::DateTime(
+                chrono::NaiveDate::from_ymd_opt(2026, 1, 15)
+                    .unwrap()
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap()
+            )
+        );
+        // ODF stores a time of day as a duration; it must not read as 1899.
+        assert_eq!(
+            sheet.cell(6, 9),
+            &Cell::Time(NaiveTime::from_hms_opt(9, 30, 0).unwrap())
+        );
+        assert_eq!(
+            sheet.cell(6, 9).display(),
+            "09:30:00",
+            "a time of day rendered as a date"
+        );
+        // A blank row inside the range stays a row, and the record after it
+        // keeps its place rather than sliding up.
+        assert!(sheet.rows[10].iter().all(|c| c.is_empty()));
+        assert_eq!(
+            sheet.cell(11, 8),
+            &Cell::Text("<b>not bold</b> & a bare ampersand".into()),
+            "text must not be interpreted as markup"
+        );
+        assert_eq!(sheet.cell(8, 8), &Cell::Bool(true));
+
+        // A sheet wider than the viewport is loaded in full, not clipped.
+        assert_eq!(wb.sheets[1].cols, 60);
+        assert_eq!(wb.sheets[1].cell(0, 59), &Cell::Text("col 60".into()));
+    }
+
+    /// The text the grid would show at one cell.
+    fn shown(wb: &LoadedWorkbook, sheet: usize, row: usize, col: usize) -> String {
+        let page = wb.page(sheet, row, 1, col, 1).expect("the sheet exists");
+        page.rows[0][0]
+            .as_ref()
+            .map(|(_, text)| text.clone())
+            .unwrap_or_default()
+    }
+
+    fn sample(name: &str) -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("samples")
+            .join(name)
+    }
+
+    #[test]
+    fn an_opendocument_spreadsheet_shows_its_number_formats() {
+        let wb = load(&sample("ExcelScry-sample.ods")).expect("an ods should open");
+        // The table starts at C6; row 6 is its first data row.
+        assert_eq!(shown(&wb, 0, 6, 4), "1,200", "units are grouped");
+        assert_eq!(shown(&wb, 0, 6, 5), "$19.99", "unit price is money");
+        assert_eq!(shown(&wb, 0, 6, 6), "$23,988.00", "revenue is money");
+        assert_eq!(shown(&wb, 0, 6, 7), "15/01/2026", "the date is day-first");
+        assert_eq!(shown(&wb, 0, 6, 9), "09:30", "the time is hh:mm");
+        assert_eq!(shown(&wb, 0, 6, 10), "35.0%", "margin is a percentage");
+        // The values themselves are untouched, so an export still writes numbers.
+        assert_eq!(wb.sheets[0].cell(6, 6), &Cell::Float(23988.0));
+    }
+
+    #[test]
+    fn an_excel_workbook_shows_its_number_formats() {
+        let wb = load(&sample("ExcelScry-sample.xlsx")).expect("an xlsx should open");
+        assert_eq!(shown(&wb, 0, 6, 4), "1,200");
+        assert_eq!(shown(&wb, 0, 6, 5), "$19.99");
+        assert_eq!(shown(&wb, 0, 6, 6), "$23,988.00");
+        assert_eq!(shown(&wb, 0, 6, 7), "15/01/2026");
+        assert_eq!(shown(&wb, 0, 6, 10), "09:30");
+        assert_eq!(shown(&wb, 0, 6, 11), "35.0%");
+        // A cell without a format keeps the plain rendering.
+        assert_eq!(shown(&wb, 0, 6, 2), "North");
+    }
+
+    #[test]
+    fn a_comma_separated_file_opens_in_the_grid() {
+        let wb = load(&sample("ExcelScry-sample.csv")).expect("a csv should open");
+        assert_eq!(wb.format, "Comma-Separated Values (csv)");
+        assert_eq!(wb.file_name, "ExcelScry-sample.csv");
+        assert_eq!(wb.sheets.len(), 1);
+        assert_eq!(wb.sheets[0].name, "ExcelScry-sample");
+        assert!(!wb.truncated);
+        assert_eq!(wb.trust.badge, "No macros or links");
+
+        let sheet = &wb.sheets[0];
+        assert_eq!(sheet.cell(0, 0), &Cell::Text("Region".into()));
+        assert_eq!(sheet.cell(1, 6), &Cell::Text("repeat customer".into()));
+        // A quoted field keeps the delimiter it contains.
+        assert_eq!(
+            sheet.cell(3, 6),
+            &Cell::Text("backordered, with a comma".into())
+        );
+        // A doubled quote is one quote.
+        assert_eq!(sheet.cell(4, 6), &Cell::Text("said \"ship it\"".into()));
+        // A value that only looks numeric is left exactly as written.
+        assert_eq!(sheet.cell(5, 2), &Cell::Text("000123".into()));
+        // And a quoted field may span lines.
+        assert_eq!(shown(&wb, 0, 5, 6), "two\nlines");
+        // The blank record between real ones is still a row, so the record
+        // after it keeps its place.
+        assert!(sheet.rows[6].iter().all(Cell::is_empty));
+        assert_eq!(
+            sheet.cell(7, 6),
+            &Cell::Text("café ✅ <b>not bold</b>".into()),
+            "text must not be interpreted as markup"
+        );
+    }
+
+    #[test]
+    fn a_tab_separated_file_opens_in_the_grid() {
+        let wb = load(&sample("ExcelScry-sample.tsv")).expect("a tsv should open");
+        assert_eq!(wb.format, "Tab-Separated Values (tsv)");
+        assert_eq!(wb.sheets[0].name, "ExcelScry-sample");
+        let sheet = &wb.sheets[0];
+        assert_eq!(sheet.cell(0, 0), &Cell::Text("Region".into()));
+        // The comma belongs to the note; on a tab file it is not a delimiter.
+        assert_eq!(
+            sheet.cell(3, 6),
+            &Cell::Text("backordered, with a comma".into())
+        );
+        assert_eq!(shown(&wb, 0, 1, 3), "19.99");
+    }
+
+    #[test]
     fn format_labels_are_human_readable() {
         assert_eq!(format_label(Path::new("a.XLSX")), "Excel Workbook (xlsx)");
         assert_eq!(
@@ -356,5 +654,13 @@ mod tests {
         assert_eq!(format_label(Path::new("a.xls")), "Excel 97-2003 (xls)");
         assert_eq!(format_label(Path::new("a.xlsb")), "Excel Binary (xlsb)");
         assert_eq!(format_label(Path::new("a.ods")), "OpenDocument (ods)");
+        assert_eq!(
+            format_label(Path::new("a.csv")),
+            "Comma-Separated Values (csv)"
+        );
+        assert_eq!(
+            format_label(Path::new("a.tsv")),
+            "Tab-Separated Values (tsv)"
+        );
     }
 }

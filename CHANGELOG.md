@@ -9,6 +9,60 @@ those entries into a version section and tags the commit that holds it.
 
 ## [Unreleased]
 
+### Added
+
+- **OpenDocument spreadsheets are viewable, and the shell knows it.** An `.ods`
+  — from LibreOffice, Google Sheets or ExcelScry's own export — opens in the
+  same grid as an Excel workbook, and the format now gets everything the Excel
+  formats get from the installer and from *Add to context menu*: the **Scry
+  Excel File** entry, a ProgID with its open command and icon, an
+  `OpenWithProgids` advert, and a Default Apps capability. The registry
+  contract in `associations.rs` and the NSIS hooks register the same four
+  extensions, and the Windows integration dialog grows a row for `.ods` by
+  reading the registration table rather than a copy of it.
+- **A sample `.ods` the app did not write.** `scripts/make_ods_sample.py` builds
+  the ODF package by hand, so the viewing test reads XML of the shape a real
+  ODF producer emits: a table at C6, a blank row inside the range, a date, a
+  boolean, a time of day, markup-looking text and a sheet wider than the
+  viewport.
+- **Cells are shown with the number format the workbook gives them.** A cell
+  formatted as currency, a percentage or `dd/mm/yyyy` now reads `$23,988.00`,
+  `35.0%` and `15/01/2026` instead of the raw value and this app's own
+  conventions. `calamine` exposes values only, so `cell_styles.rs` reads the
+  style tables itself — `xl/styles.xml` with each worksheet's style index for
+  OOXML (including the workbook's 1904 date system), and `content.xml`'s
+  `number:*` styles with the cell styles pointing at them for ODF — and
+  `number_format.rs` renders through `ssfmt`, which implements Excel's
+  format-code grammar (sections, bracket currencies, escaped literals, date and
+  elapsed-time tokens). ODF number styles are translated into that grammar, so
+  both file families go through one renderer. Values stay typed: the grid
+  changes, the export does not. Where a format would lose data — a 17-digit
+  integer, a boolean, an error — the exact rendering wins.
+- **Delimited text files open in the same grid.** A `.csv` or `.tsv` — from a
+  database export, a script, or Excel's *Unicode Text* save — is read as
+  records and lifted into the model an ODS sheet already uses: one sheet named
+  after the file, ragged rows, a blank line kept as a row, and a status bar
+  that says what the file is. The reader handles what real files contain: a
+  quoted field may hold the delimiter, doubled quotes and line breaks; `CRLF`,
+  `LF` and `CR` all end a record; a UTF-8 BOM is skipped and UTF-16 with a BOM
+  is decoded; a `.csv` that uses `;` or a tab is recognised from its first
+  record; and undecodable bytes become replacement characters instead of
+  losing the cell. Every value stays text, because a CSV has no types:
+  `000123` and `1E5` are shown as written rather than reparsed, so an export
+  cannot quietly change them. The reader shares the workbook's cell budget, so
+  a text file too large to hold is truncated and says so. The trust badge
+  reports a text file clean — it is not a package, so there is nothing in it
+  that could carry macros, links, connections, objects or controls.
+
+### Fixed
+
+- **An `.ods` time cell showed its raw duration instead of the time.** ODF
+  stores a bare time as an ISO duration, and the reader passed it through as
+  text, so a 09:30 cell displayed `PT09H30M00S`. Time values are now parsed: a
+  span shorter than a day becomes a clock time, a longer one stays a duration
+  that renders as `36:00:00` rather than wrapping, and fractional seconds
+  survive. Anything that is not a duration is still shown verbatim.
+
 ## [0.2.0] - 2026-10-16
 
 ### Added

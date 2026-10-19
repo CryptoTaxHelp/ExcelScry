@@ -77,6 +77,19 @@ impl Trust {
         }
     }
 
+    /// A delimited text file: there is no package, so there is nothing that
+    /// could carry macros, links, connections, objects or controls. Unlike
+    /// [`Trust::unknown`], this is a real answer rather than a missing one.
+    pub const fn plain_text() -> Self {
+        Self {
+            macros: Some(false),
+            external_links: Some(0),
+            connections: Some(false),
+            embedded_objects: Some(0),
+            activex: Some(false),
+        }
+    }
+
     /// Short labels for the signals that came back positive.
     fn hazards(&self) -> Vec<String> {
         let mut out = Vec::new();
@@ -614,6 +627,16 @@ mod tests {
                 "ActiveX controls"
             ]
         );
+    }
+
+    #[test]
+    fn plain_text_reports_everything_clean() {
+        // A `.csv` is not a package: nothing in it can carry these signals.
+        let report = TrustReport::new(Trust::plain_text());
+        assert_eq!(report.level, TrustLevel::Clean);
+        assert_eq!(report.badge, "No macros or links");
+        assert!(report.hazards.is_empty());
+        assert!(report.unchecked.is_empty());
     }
 
     #[test]

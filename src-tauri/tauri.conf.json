@@ -38,8 +38,8 @@
       "icons/icon.ico"
     ],
     "publisher": "ExcelScry",
-    "shortDescription": "View XLS and XLSX spreadsheets and export them to ODS",
-    "longDescription": "ExcelScry opens Excel workbooks (.xlsx, .xlsm, .xlsb, .xls) and OpenDocument spreadsheets, renders them in a fast virtualised grid, and exports any open workbook to OpenDocument (.ods) format. The installer adds a \"Scry Excel File\" entry to the Explorer context menu and registers ExcelScry in Windows' Default Apps list.",
+    "shortDescription": "View Excel and OpenDocument spreadsheets, and export them to ODS",
+    "longDescription": "ExcelScry opens Excel workbooks (.xlsx, .xlsm, .xlsb, .xls) and OpenDocument spreadsheets (.ods) in a fast virtualised grid, and exports any open workbook back to OpenDocument format. The installer adds a \"Scry Excel File\" entry to the Explorer context menu for every one of those formats and registers ExcelScry in Windows' Default Apps list.",
     "copyright": "Copyright © 2026 ExcelScry",
     "licenseFile": "../LICENSE",
     "windows": {

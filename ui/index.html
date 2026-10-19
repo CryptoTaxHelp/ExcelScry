@@ -83,15 +83,16 @@
             </svg>
             <h1>ExcelScry</h1>
             <p class="welcome-sub">
-              Open an Excel workbook or OpenDocument spreadsheet, or drop a file here.
+              Open an Excel workbook, OpenDocument spreadsheet or delimited text
+              file, or drop a file here.
             </p>
             <button id="btn-open-2" class="btn btn-primary btn-lg" type="button">
               Choose a file
             </button>
             <p class="welcome-formats">
               Reads <strong>.xlsx</strong> · <strong>.xlsm</strong> · <strong>.xls</strong> ·
-              <strong>.xlsb</strong> · <strong>.ods</strong> &nbsp;—&nbsp; exports
-              <strong>.ods</strong>
+              <strong>.xlsb</strong> · <strong>.ods</strong> · <strong>.csv</strong> ·
+              <strong>.tsv</strong> &nbsp;—&nbsp; exports <strong>.ods</strong>
             </p>
           </div>
         </section>
@@ -155,10 +156,10 @@
             <div><dt>Executable</dt><dd id="fact-exe">—</dd></div>
             <div><dt>Registered for this user</dt><dd id="fact-user">—</dd></div>
             <div><dt>Registered for all users</dt><dd id="fact-machine">—</dd></div>
-            <!-- One row per extension ExcelScry registers — .xlsx, .xlsm and
-                 .xls today — is appended here by renderExtensionFacts(), so the
-                 list follows the registration table rather than a copy of it in
-                 the markup. -->
+            <!-- One row per extension ExcelScry registers — .xlsx, .xlsm, .xls
+                 and .ods today — is appended here by renderExtensionFacts(), so
+                 the list follows the registration table rather than a copy of
+                 it in the markup. -->
           </dl>
 
           <p class="hint" id="assoc-note"></p>
@@ -178,7 +179,7 @@
             <p>
               Installing the <strong>Scry Excel File</strong> context-menu entry works directly, and
               the installer does that for you. Becoming the program that
-              <em>opens</em> .xlsx, .xlsm and .xls by default is different: since Windows 8 the choice is
+              <em>opens</em> .xlsx, .xlsm, .xls and .ods by default is different: since Windows 8 the choice is
               stored in a hash-protected <code>UserChoice</code> key that only Windows itself may
               write. An installer that fakes it is silently ignored, so ExcelScry registers itself
               as a candidate and hands you the one-click confirmation in

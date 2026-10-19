@@ -1,0 +1,9 @@
+Region	Product	Units	Unit price	Revenue	Ordered	Notes
+North	Widget	1200	19.99	23988.00	15/01/2026	repeat customer
+South	Widget	940	19.99	18790.60	03/02/2026	
+East	Gadget	0	249.50	0.00	20/02/2026	backordered, with a comma
+West	Gadget	37	249.50	9231.50	01/03/2026	"said ""ship it"""
+North	Doohickey	000123	0.50	9223.37	14/03/2026	"two
+lines"
+
+South	Doohickey	8	0.10	0.80	02/04/2026	café ✅ <b>not bold</b>

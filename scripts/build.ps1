@@ -50,6 +50,7 @@ Copy-Item "README.md" "dist/ExcelScry-portable/README.md"
 if (Test-Path "samples") {
     Copy-Item "samples/*.xlsx" "dist/ExcelScry-portable/samples/" -ErrorAction SilentlyContinue
     Copy-Item "samples/*.xlsm" "dist/ExcelScry-portable/samples/" -ErrorAction SilentlyContinue
+    Copy-Item "samples/*.ods" "dist/ExcelScry-portable/samples/" -ErrorAction SilentlyContinue
 }
 $setupTarget = "dist/ExcelScry-$version-setup.exe"
 Copy-Item $setup.FullName $setupTarget
