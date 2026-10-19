@@ -9,6 +9,16 @@ those entries into a version section and tags the commit that holds it.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The delimited-text samples are the files the generator wrote, on every
+  machine.** `.gitattributes` normalised `samples/ExcelScry-sample.csv` and
+  `.tsv`, so a checkout with native line endings turned the break inside a
+  quoted field into CRLF and the reader - correctly - produced `two\r\nlines`
+  where the test expected `two\nlines`. That passed only on a machine that had
+  just regenerated the samples, and failed on Windows CI. Both files are marked
+  `-text`, so a clone reproduces their bytes exactly.
+
 ## [0.3.0] - 2026-10-18
 
 ### Added
