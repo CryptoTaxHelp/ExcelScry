@@ -668,6 +668,47 @@ def signature_location(location: str) -> str:
     return f"{location[:end]}.sig{location[end:]}"
 
 
+# An asset named by the release API rather than by its file name, which is what
+# the manifest an upload writes carries.
+GITHUB_ASSET = re.compile(
+    r"^https://api\.github\.com/repos/(?P<owner>[^/]+)/(?P<repo>[^/]+)"
+    r"/releases/assets/(?P<id>\d+)$"
+)
+
+
+def release_page_url(location: str) -> str:
+    """Where GitHub serves an asset by name rather than by id.
+
+    A manifest written by the release upload names each asset with its API URL,
+    `.../releases/assets/<id>`. That URL answers with the asset itself only when
+    the request asks for `application/octet-stream` - which the updater does -
+    and it has no `<id>.sig` beside it: the suffix names the same asset again.
+    The release page serves the same bytes under the asset's own file name,
+    which is something a file published next to it can be named from.
+    """
+    match = GITHUB_ASSET.match(location)
+    if not match:
+        return location
+    url = (
+        f"https://api.github.com/repos/{match['owner']}/{match['repo']}"
+        f"/releases/assets/{match['id']}"
+    )
+    request = urllib.request.Request(
+        url, headers={"Accept": "application/vnd.github+json"}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=MANIFEST_TIMEOUT) as response:
+            asset = json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        raise SystemExit(f"error: {url} answered {error.code}") from None
+    except urllib.error.URLError as error:
+        raise SystemExit(f"error: {url} could not be reached: {error.reason}") from None
+    download_url = asset.get("browser_download_url") if isinstance(asset, dict) else None
+    if not isinstance(download_url, str) or not download_url:
+        raise SystemExit(f"error: {url} names no download URL")
+    return download_url
+
+
 def sibling(location: str, name: str) -> str:
     """The URL or path of another asset published with `location`.
 
@@ -719,8 +760,14 @@ def download(url: str, missing: str = "") -> tuple[pathlib.Path, int, str, bytes
             raise SystemExit(f"error: {url} does not exist. {missing}".strip())
         source = local.open("rb")
     else:
+        # What the updater asks for: an asset the manifest names by id answers
+        # with its metadata, and this response is the one it needs to be the
+        # bytes instead. A release-page URL ignores the header.
+        request = urllib.request.Request(
+            url, headers={"Accept": "application/octet-stream"}
+        )
         try:
-            source = urllib.request.urlopen(url, timeout=DOWNLOAD_TIMEOUT)
+            source = urllib.request.urlopen(request, timeout=DOWNLOAD_TIMEOUT)
         except urllib.error.HTTPError as error:
             if error.code == 404 and missing:
                 raise SystemExit(f"error: {url} answers 404. {missing}") from None
@@ -839,7 +886,7 @@ def fetch_published_signature(installer: str, signature_field: str) -> str:
     every check below is about the file the release serves rather than a copy of
     it in a document.
     """
-    location = signature_location(installer)
+    location = signature_location(release_page_url(installer))
     name = asset_name(location)
     published = fetch(
         location,

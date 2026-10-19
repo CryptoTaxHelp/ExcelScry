@@ -9,6 +9,19 @@ those entries into a version section and tags the commit that holds it.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Verifying a published release reads the manifest it is handed.** The
+  manifest names each asset by its GitHub API URL
+  (`.../releases/assets/<id>`), which serves the asset only to a request that
+  asks for `application/octet-stream`, and `.sig` appended to an id names that
+  same asset again rather than the file published beside it. Verification
+  therefore fetched JSON where the installer should be and looked for
+  `<id>.sig` instead of the installer's own signature, and failed 0.3.1
+  although the release itself was sound. It now asks for the bytes the updater
+  asks for, and resolves the asset's own name before looking for the signature
+  published beside it.
+
 ## [0.3.1] - 2026-10-19
 
 ### Fixed
