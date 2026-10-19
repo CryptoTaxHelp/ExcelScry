@@ -9,6 +9,8 @@ those entries into a version section and tags the commit that holds it.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-19
+
 ### Fixed
 
 - **The delimited-text samples are the files the generator wrote, on every
