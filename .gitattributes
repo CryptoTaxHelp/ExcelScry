@@ -11,6 +11,14 @@
 *.bat text eol=crlf
 *.cmd text eol=crlf
 
+# Delimited-text fixtures are byte-exact. The generator writes CRLF records and
+# a quoted field may hold its own line break; a checkout that turned that
+# break into CRLF would hand the reader a different field than the one the
+# file was written with, and the test would fail only on a machine whose
+# endings differ.
+samples/*.csv -text
+samples/*.tsv -text
+
 # Binary assets: never normalise, never diff.
 *.png binary
 *.ico binary
