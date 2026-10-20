@@ -9,6 +9,164 @@ those entries into a version section and tags the commit that holds it.
 
 ## [Unreleased]
 
+### Added
+
+- **A format's zero section and its section colours survive the ODS export.**
+  `0.00;[Red]-0.00;"-"` used to lose both the red and the dash: only the
+  positive and negative sections were translated, and a section's colour was
+  dropped. The third section is now written as a `value()=0` `style:map`, with a
+  literal-only zero (`"-"`) borrowing the positive section's number style so a
+  percentage or currency zero does not gain a stray `%` or symbol. Each
+  section's `[Red]`, `[Blue]`, other named colour or indexed colour becomes
+  `fo:color` on that section's ODF number style, and the reader turns it back
+  into the matching section token. A literal-only negative section is handled
+  the same way; an empty zero section (hide zeros) is still not represented.
+- **Export to ODS keeps a sheet's bold and italic text, its colours and its
+  column widths.** A styled report used to come back as uniform plain text with
+  evenly spaced columns, because the exporter wrote values and number formats
+  only. `cell_styles.rs` now reads each cell's font and fill beside its number
+  format — `<b>`, `<i>`, `fo:font-weight`, `fo:font-style`, text colour and
+  background — resolving Excel's theme colours (with their tint), its 64-entry
+  indexed palette and explicit ARGB values, and following an ODF cell style's
+  `parent-style-name` chain. The export writes those as ODF text and cell
+  properties on the same cell style as the number format, so a bold money total
+  stays bold money; a fill on a cell with no value is written as a styled blank,
+  and column widths already read for the grid are written as the matching
+  physical lengths. The grid itself still renders uniformly, and borders and
+  font names/sizes are still not exported.
+- **Row heights and merged regions survive the ODS export, and column widths
+  cover the whole table.** A report's tall title row, tall total row and merged
+  titles used to reopen flattened and unmerged. Row heights, including the
+  workbook's default height, are now written as ODF row styles, and each merged
+  region is written as a spanning cell with its covered cells marked; a width
+  on a blank column at the edge of the report is kept too, rather than being
+  dropped because no cell used that column.
+- **Frozen rows and columns stay pinned while the sheet scrolls.** A workbook
+  that freezes its header row or label column used to open with the frozen band
+  scrolling away like any other cell. `sheet_layout.rs` now reads Excel's
+  `<pane state="frozen">` and LibreOffice's `HorizontalSplitMode`/
+  `VerticalSplitMode` view settings, and the front end draws the four frozen
+  panes over the body: the fixed corner, the top band following horizontal
+  scrolling, and the left band following vertical scrolling. Frozen row
+  numbers and column letters stay with their cells, clicks, the selection and
+  scroll-into-view respect the frozen edge, and wheel scrolling over a frozen
+  pane still moves the body. A text table's separately chosen header row is
+  unchanged.
+- **The grid is laid out with the sheet's own column widths, row heights and
+  merged cells.** A report built in Excel used to open as a uniform 112 × 24
+  grid: a 180-pixel first column collapsed to the default, a deliberately tall
+  title row lost its height, and every merged region showed only its anchor in
+  one cell with the rest of the region blank. `src-tauri/src/sheet_layout.rs`
+  now reads `<cols>`, `<row ht>` and `<mergeCell>` from each worksheet and
+  `table:column-width`, `table:row-height` and spanned cells from an ODF
+  `content.xml`, converts them to pixels and sends them with the sheet's
+  summary. The front end builds prefix sums of the sizes — two typed arrays, so
+  a million rows cost no per-cell arithmetic — and lays the grid, the header
+  strips, hit-testing, scroll-into-view and Page Up/Down out from them. Each
+  merged region is drawn once, from its anchor, at the size of the whole span,
+  so it has no stray grid lines inside it, and selecting any cell it covers —
+  by click or arrow key — selects the region. Arrow keys leave a merged region
+  as a whole. Sheets that specify nothing keep the app's own metrics, and a
+  sheet too tall for a browser's canvas is scaled down as a whole so it stays
+  scrollable. The UI harness has a *Sized & merged* sheet
+  ([docs/sheet-geometry.html](docs/sheet-geometry.html)) for exercising it.
+- **Export to ODS keeps the sheet's number formats.** The grid has always shown
+  `€ 1,234.50` where the file stored `1234.5`, but the export wrote only the
+  value, so the `.ods` opened with `1234.5` under a `dd/mm/yyyy` heading that
+  read as a serial. Each distinct format code is now translated into the ODF
+  style that says the same thing — money as a `number:currency-style` with its
+  symbol, percentages as a `number:percentage-style` that scales by 100, dates
+  and times as `number:date-style`/`number:time-style` with the same field
+  widths, and a `[h]:mm:ss` duration as a time style that does not wrap at 24
+  hours. Excel's second section becomes an ODF `style:map`, so a negative stays
+  `($1,234.50)`. Codes ODF cannot express — fractions, scientific notation,
+  `mmmmm`, the Buddhist calendar — are written as plain values rather than
+  approximated. The new `src-tauri/src/ods_formats.rs` does the translation;
+  `cell_styles.rs` learned to read `style:map` back into a two-section code and
+  to read a non-overflowing time style as a duration.
+- **A delimited file that opens wrong can be re-read with another delimiter or
+  encoding.** A `.csv` is bytes plus a convention: the extension asks for a
+  comma, the first record can disagree, and a file from a Windows tool is
+  Windows-1252 far more often than it is valid UTF-8. Rather than making the
+  guess final, a bar above the grid names what the file was read with and
+  offers comma, semicolon, tab and pipe, and UTF-8, Windows-1252 and UTF-16 in
+  either byte order. Choosing re-reads the file; Reload keeps the choice and
+  Auto puts the guess back. When a read leaves undecodable bytes, the bar says
+  so and suggests another encoding.
+- **CSV encodings are recognised, so the picker is rarely needed.** A `.csv`
+  from a Windows tool is usually Windows-1252 or UTF-16 without a byte order
+  mark, and both used to need the bar: the first arrived as `caf�`, the second
+  as one character per byte. The bytes now settle it before the first record is
+  read — a stream that is not UTF-8 is Windows-1252, and a zero byte beside
+  every character is UTF-16, little- or big-endian, with the zeros' side
+  deciding the byte order and the window decoded to confirm it is text. A file
+  whose first 8 KiB look like UTF-8 but whose later bytes do not is read again
+  whole as Windows-1252 rather than shown with replacement characters, and a
+  multi-byte character cut in half by that window is not mistaken for one. The
+  encoding stays on Auto in the bar, which names what the read settled on;
+  choosing one still overrides detection, and an explicit UTF-8 read of a
+  legacy file still reports the replacement characters and the hint
+  ([docs/text-dialect.html](docs/text-dialect.html)).
+- **The delimiter and encoding chosen for a file are remembered for it.** An
+  export that arrives semicolon-separated in Windows-1252 every week had to be
+  fixed every week, because the choice lived only in the window. A choice made
+  in the bar is now written to `text-dialects.json` in this build's local data
+  directory by `src-tauri/src/text_prefs.rs`, keyed by the file's canonical
+  path — made lower-case on Windows, so another spelling of the same file finds
+  it. The next open of that file starts from the remembered parts and detects
+  only what nobody chose; an explicit *Auto* takes effect immediately and
+  forgets the entry rather than being refilled from it. Reload and the first
+  open never rewrite the store, so opening a file cannot silently change what
+  the next open does. Only what was chosen is stored, never a detection result,
+  and a store that cannot be read or written is ignored: the file still opens,
+  and the choice applies for that session.
+- **A delimited file's first record stays visible while its body scrolls.** In a
+  `.csv`/`.tsv` that row is the header, and losing it a few hundred rows down is
+  what makes a wide table hard to read. The row is pinned above the grid from
+  the first pixel of scroll, follows horizontal scrolling, keeps its row number
+  beside it, and carries the selection outline when the selected cell is in it.
+  Workbooks are left alone: their first row is data, not necessarily a header.
+- **The pinned header row is the user's to choose.** An export that puts a title
+  and a generated-on line above its column names was pinned by the wrong row,
+  and that title is not what the body needs to keep in sight. A *Header row*
+  field in the delimited-text bar names the record to hold, and clicking a row
+  number in the strip moves the pin there; clearing the field, or clicking the
+  chosen number again, pins nothing. Everything above the chosen row scrolls
+  away normally before the strip takes over at that row's own top edge, the
+  strip takes the chosen row's height, and a selected header carries its
+  outline with it. The choice belongs to the open file, so another delimiter,
+  another encoding or Reload keeps it; a workbook still pins nothing
+  ([docs/header-row.html](docs/header-row.html)).
+
+### Changed
+
+- **The update manifest names its assets by file, not by asset id.**
+  `tauri-action` writes each platform's `url` as the release API's
+  `.../releases/assets/<id>`, which serves the asset only to a request that asks
+  for `application/octet-stream`; every other tool gets that asset's JSON
+  metadata, and `<id>.sig` names the same asset again rather than the signature
+  published beside it. `scripts/manifest_urls.py` now rewrites those URLs to the
+  release page's `.../releases/download/<tag>/<name>` before the manifest is
+  signed, looking the names up in the release being published rather than
+  guessing them, so the signature covers the bytes an installed copy downloads.
+  The verify job checks the published manifest names its assets that way.
+- **A release fails in seconds when the updater signing key is missing or
+  wrong.** Every `tauri build` signs its updater artifact, so without
+  `TAURI_SIGNING_PRIVATE_KEY` the build failed after compiling the whole app, as
+  an exit 1 from `tauri build` that said nothing about a secret; a secret
+  holding another key's material built and signed perfectly and was then
+  refused by every installed copy. The release and installer jobs now read the
+  key before they build anything — the release job before it even installs
+  Rust — decoding it the way the Tauri CLI does, checking its own checksum,
+  decrypting it with the password secret (empty when unset, as the CLI assumes)
+  and holding its key id and public key against the `pubkey` in
+  `tauri.conf.json`. The installer job used to have a presence-only shell check
+  of its own, which a secret holding the wrong key passed; it now runs
+  `verify_signing_key.py`, the same preflight as the release job, so a missing
+  or wrong key stops either build before a compile. `scripts/verify_workflow.py`
+  holds both jobs to that ordering, and refuses a job whose check is missing,
+  moved after the build, or replaced by one of its own.
+
 ## [0.3.2] - 2026-10-19
 
 ### Fixed

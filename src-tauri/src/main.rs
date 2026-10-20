@@ -8,6 +8,9 @@ mod manifest;
 mod model;
 mod number_format;
 mod ods_export;
+mod ods_formats;
+mod sheet_layout;
+mod text_prefs;
 mod text_table;
 mod trust;
 mod update;
@@ -48,12 +51,49 @@ impl AppState {
 // ---------------------------------------------------------------------------
 
 /// Parse a spreadsheet and make it the open workbook.
+///
+/// `delimiter` and `encoding` are how the UI re-reads a `.csv`/`.tsv` that
+/// opened wrong; empty means the file decides, which is what the first open
+/// uses. They are validated here rather than trusted, since they arrive from
+/// the webview. `dialect_explicit` says the UI is reporting a choice the user
+/// just made, which is the only case worth remembering for this file.
 #[tauri::command]
-async fn open_workbook(path: String, state: State<'_, AppState>) -> Result<WorkbookInfo, String> {
-    let requested = PathBuf::from(&path);
-    let loaded = tauri::async_runtime::spawn_blocking(move || workbook::load(&requested))
-        .await
-        .map_err(|e| format!("Could not read the file: {e}"))??;
+async fn open_workbook(
+    path: String,
+    delimiter: Option<String>,
+    encoding: Option<String>,
+    dialect_explicit: Option<bool>,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<WorkbookInfo, String> {
+    let requested = text_table::Dialect::from_labels(delimiter.as_deref(), encoding.as_deref())?;
+    // A file read with choices before starts from them; detection only fills in
+    // the parts nobody chose. A store that cannot be read simply remembers
+    // nothing.
+    let store = app.path().app_local_data_dir().ok();
+    let remembered = store
+        .as_deref()
+        .map(|directory| text_prefs::lookup(directory, Path::new(&path)))
+        .unwrap_or_default();
+    let explicit = dialect_explicit.unwrap_or(false);
+    let dialect = text_prefs::resolve(requested, &remembered, explicit);
+    let requested_path = PathBuf::from(&path);
+    let loaded =
+        tauri::async_runtime::spawn_blocking(move || workbook::load_with(&requested_path, dialect))
+            .await
+            .map_err(|e| format!("Could not read the file: {e}"))??;
+
+    // Only a choice made in the bar is stored; the first open of a file and a
+    // reload must not rewrite what the store already says.
+    if explicit {
+        if let Some(directory) = store.as_deref() {
+            text_prefs::remember(
+                directory,
+                Path::new(&path),
+                text_prefs::Entry::from_dialect(requested),
+            );
+        }
+    }
 
     let info = loaded.info();
     *state

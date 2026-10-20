@@ -38,6 +38,80 @@ function cssNumber(name, fallback) {
 const ROW_H = cssNumber("--rowh", 24);
 const COL_W = cssNumber("--colw", 112);
 
+// The grid is laid out from the sheet's own geometry when it has one. `xs` and
+// `ys` are prefix sums of column widths and row heights: cell i starts at
+// xs[i] / ys[i], so a million-row sheet costs two typed arrays rather than a
+// lookup per cell. Merges are two maps: anchors to their span, and covered
+// cells to the anchor that owns them.
+const geom = {
+  cols: 0,
+  rows: 0,
+  xs: new Float64Array(1),
+  ys: new Float64Array(1),
+  anchors: new Map(),
+  covered: new Map(),
+};
+/** Coverage beyond this is not remembered; the anchor still draws its span. */
+const MAX_MERGE_COVERAGE = 200_000;
+/** Browsers stop scrolling a single element somewhere near 33 million pixels. */
+const MAX_CANVAS = 30_000_000;
+
+const mergeAt = (row, col) => geom.anchors.get(`${row}:${col}`) || null;
+
+function mergeOrigin(row, col) {
+  const anchor = geom.covered.get(`${row}:${col}`);
+  if (!anchor) return null;
+  const [r, c] = anchor.split(":").map(Number);
+  return { row: r, col: c };
+}
+
+const colWidth = (col) => geom.xs[col + 1] - geom.xs[col];
+const rowHeight = (row) => geom.ys[row + 1] - geom.ys[row];
+
+/** Largest index whose start is at or before `value`. */
+function indexAt(edges, value) {
+  let lo = 0;
+  let hi = edges.length - 2;
+  if (hi < 0) return 0;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (edges[mid] <= value) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo;
+}
+
+const colAtX = (x) => clamp(indexAt(geom.xs, x), 0, Math.max(geom.cols - 1, 0));
+const rowAtY = (y) => clamp(indexAt(geom.ys, y), 0, Math.max(geom.rows - 1, 0));
+
+/**
+ * Fill an axis with the start of every column or row.
+ *
+ * `sizes` is the sparse `[[index, pixels], ...]` list the workbook sent, in
+ * order; walking it alongside the axis keeps this linear in rows plus
+ * overrides, which matters on a sheet with a million rows.
+ */
+function fillAxis(edges, count, sizes, fallback) {
+  let next = 0;
+  for (let index = 0; index < count; index += 1) {
+    while (next < sizes.length && sizes[next][0] < index) next += 1;
+    let size = fallback;
+    if (next < sizes.length && sizes[next][0] === index) {
+      const value = sizes[next][1];
+      if (Number.isFinite(value) && value > 0) size = value;
+    }
+    edges[index + 1] = edges[index] + size;
+  }
+}
+
+/** Scale a prefix-sum axis down if the sheet would exceed the canvas limit. */
+function fitCanvas(edges) {
+  const total = edges[edges.length - 1];
+  if (total <= MAX_CANVAS) return;
+  const scale = MAX_CANVAS / total;
+  for (let i = 0; i < edges.length; i += 1) edges[i] *= scale;
+}
+
 const TILE_ROWS = 100;
 const TILE_COLS = 40;
 const TILE_CACHE_MAX = 48;
@@ -68,6 +142,12 @@ const state = {
   updateError: "",
   checkingUpdate: false,
   updating: false,
+  /** The delimiter and encoding the open text file was read with, as chosen
+   *  in the bar: "" means the file decided. */
+  text: { delimiter: "", encoding: "" },
+  /** The text table's header, pinned above the grid while the rest scrolls.
+   *  Zero-based; `null` pins nothing. */
+  headerRow: null,
 };
 
 const els = {
@@ -111,6 +191,23 @@ const els = {
   btnReload: document.getElementById("btn-reload"),
   btnSettings: document.getElementById("btn-settings"),
   settings: document.getElementById("settings"),
+  textbar: document.getElementById("textbar"),
+  textDelimiter: document.getElementById("text-delimiter"),
+  textEncoding: document.getElementById("text-encoding"),
+  textHeader: document.getElementById("text-header"),
+  textDetected: document.getElementById("text-detected"),
+  textHint: document.getElementById("text-hint"),
+  frozenViewport: document.getElementById("frozen-viewport"),
+  frozen: document.getElementById("frozen"),
+  frozenCorner: document.getElementById("frozen-corner"),
+  freezeColsHead: document.getElementById("freeze-cols-head"),
+  freezeRowsHead: document.getElementById("freeze-rows-head"),
+  freezeTop: document.getElementById("freeze-top"),
+  freezeTopCells: document.getElementById("freeze-top-cells"),
+  freezeLeft: document.getElementById("freeze-left"),
+  freezeLeftCells: document.getElementById("freeze-left-cells"),
+  freezeCorner: document.getElementById("freeze-corner-pane"),
+  freezeCornerCells: document.getElementById("freeze-corner-cells"),
   assocFacts: document.getElementById("assoc-facts"),
 };
 
@@ -183,11 +280,99 @@ function setBusy(busy, message) {
 // --------------------------------------------------------------------------
 
 const currentSheet = () => (state.info ? state.info.sheets[state.sheet] : null);
+/** A delimited text table: a record can be pinned as its header. */
+const isTextTable = () => Boolean(state.info && state.info.text);
 const realRows = () => (currentSheet() ? currentSheet().rows : 0);
 const realCols = () => (currentSheet() ? currentSheet().cols : 0);
+/** The row pinned above the grid: the chosen header, if it still exists. */
+function pinnedRow() {
+  if (!isTextTable() || state.headerRow === null) return null;
+  return state.headerRow >= 0 && state.headerRow < realRows() ? state.headerRow : null;
+}
 // Always keep one row/column of header geometry, even for an empty sheet.
 const gridRows = () => Math.max(realRows(), 1);
 const gridCols = () => Math.max(realCols(), 1);
+
+/**
+ * The workbook's frozen rows and columns, bounded by the sheet.
+ *
+ * A text table has no workbook freeze: its pinned header is a separate choice
+ * and the two features never apply to the same file.
+ */
+function frozenCounts() {
+  const sheet = currentSheet();
+  if (!sheet || isTextTable()) return { rows: 0, cols: 0 };
+  const count = (value, limit) =>
+    clamp(Number.isInteger(value) ? value : 0, 0, Math.max(limit, 0));
+  return {
+    rows: count(sheet.frozenRows, realRows()),
+    cols: count(sheet.frozenCols, realCols()),
+  };
+}
+
+/** Width and height of the frozen bands, in the grid's pixel metrics. */
+function frozenSize(freeze = frozenCounts()) {
+  return {
+    width: freeze.cols > 0 ? geom.xs[freeze.cols] : 0,
+    height: freeze.rows > 0 ? geom.ys[freeze.rows] : 0,
+  };
+}
+
+/**
+ * Lay the sheet out from its own column widths, row heights and merges.
+ *
+ * A sheet that says nothing about its geometry keeps this app's uniform
+ * metrics; a workbook-default width still applies to every column it does not
+ * name by hand, so a wide sheet does not collapse to the app's own default.
+ */
+function rebuildGeometry() {
+  const sheet = currentSheet();
+  const cols = gridCols();
+  const rows = gridRows();
+  const widths = sheet && sheet.colWidths ? sheet.colWidths : [];
+  const heights = sheet && sheet.rowHeights ? sheet.rowHeights : [];
+  const defaultCol = Number.isFinite(sheet && sheet.defaultColWidth)
+    ? sheet.defaultColWidth
+    : COL_W;
+  const defaultRow = Number.isFinite(sheet && sheet.defaultRowHeight)
+    ? sheet.defaultRowHeight
+    : ROW_H;
+
+  const xs = new Float64Array(cols + 1);
+  const ys = new Float64Array(rows + 1);
+  fillAxis(xs, cols, widths, defaultCol);
+  fillAxis(ys, rows, heights, defaultRow);
+  // A browser cannot scroll past ~33 million pixels: beyond that the
+  // scrollbar lies about where it is. A sheet that tall is scaled down as a
+  // whole (keeping every cell's share) rather than becoming unreachable.
+  fitCanvas(xs);
+  fitCanvas(ys);
+
+  geom.cols = cols;
+  geom.rows = rows;
+  geom.xs = xs;
+  geom.ys = ys;
+  geom.anchors.clear();
+  geom.covered.clear();
+
+  let covered = 0;
+  for (const merge of sheet && sheet.merges ? sheet.merges : []) {
+    if (!merge || merge.rows < 1 || merge.cols < 1) continue;
+    if (merge.row >= rows || merge.col >= cols) continue;
+    const bottom = Math.min(rows, merge.row + merge.rows);
+    const right = Math.min(cols, merge.col + merge.cols);
+    const anchor = `${merge.row}:${merge.col}`;
+    geom.anchors.set(anchor, { rows: bottom - merge.row, cols: right - merge.col });
+    for (let row = merge.row; row < bottom; row += 1) {
+      for (let col = merge.col; col < right; col += 1) {
+        if (row === merge.row && col === merge.col) continue;
+        if (covered >= MAX_MERGE_COVERAGE) break;
+        geom.covered.set(`${row}:${col}`, anchor);
+        covered += 1;
+      }
+    }
+  }
+}
 
 const tileKey = (tr, tc) => `${tr}:${tc}`;
 const maxTileRow = () => Math.max(0, Math.ceil(realRows() / TILE_ROWS) - 1);
@@ -273,10 +458,14 @@ function scheduleRender() {
 
 function visibleWindow() {
   const { scrollLeft, scrollTop, clientWidth, clientHeight } = els.body;
-  const firstCol = Math.floor(scrollLeft / COL_W);
-  const lastCol = Math.ceil((scrollLeft + Math.max(clientWidth, 1)) / COL_W);
-  const firstRow = Math.floor(scrollTop / ROW_H);
-  const lastRow = Math.ceil((scrollTop + Math.max(clientHeight, 1)) / ROW_H);
+  const width = Math.max(clientWidth, 1);
+  const height = Math.max(clientHeight, 1);
+  // Binary search rather than division: columns and rows are no longer one
+  // width, and the offset of cell 900,000 cannot be computed by multiplying.
+  const firstCol = colAtX(scrollLeft);
+  const firstRow = rowAtY(scrollTop);
+  const lastCol = Math.min(gridCols(), colAtX(scrollLeft + width) + 1);
+  const lastRow = Math.min(gridRows(), rowAtY(scrollTop + height) + 1);
   return {
     firstCol: clamp(firstCol, 0, Math.max(gridCols() - 1, 0)),
     lastCol: clamp(lastCol, 1, gridCols()),
@@ -284,6 +473,20 @@ function visibleWindow() {
     lastRow: clamp(lastRow, 1, gridRows()),
     scrollLeft,
     scrollTop,
+  };
+}
+
+/** Where the selected cell sits, grown to its whole merged region. */
+function selectionBox() {
+  const { row, col } = state.selection;
+  const span = mergeAt(row, col) || { rows: 1, cols: 1 };
+  const left = geom.xs[col];
+  const top = geom.ys[row];
+  return {
+    left,
+    top,
+    width: geom.xs[Math.min(col + span.cols, geom.cols)] - left,
+    height: geom.ys[Math.min(row + span.rows, geom.rows)] - top,
   };
 }
 
@@ -298,6 +501,27 @@ function ensureTiles(view) {
   const wanted = [];
   for (let tr = fromRow; tr <= toRow; tr++) {
     for (let tc = fromCol; tc <= toCol; tc++) wanted.push(tileKey(tr, tc));
+  }
+  // A text table's header is pinned above the viewport while scrolling, so the
+  // tile holding it is needed even when that row is a long way above the
+  // visible ones.
+  const header = pinnedRow();
+  if (header !== null) {
+    const tr = Math.floor(header / TILE_ROWS);
+    for (let tc = fromCol; tc <= toCol; tc++) wanted.push(tileKey(tr, tc));
+  }
+
+  // Frozen rows and columns stay visible while the body scrolls, so their
+  // tiles are wanted even when they are outside the visible window.
+  const freeze = frozenCounts();
+  const frozenRows = Math.ceil(freeze.rows / TILE_ROWS);
+  const frozenCols = Math.ceil(freeze.cols / TILE_COLS);
+  for (let tr = 0; tr < frozenRows; tr++) {
+    for (let tc = 0; tc < frozenCols; tc++) wanted.push(tileKey(tr, tc));
+    for (let tc = fromCol; tc <= toCol; tc++) wanted.push(tileKey(tr, tc));
+  }
+  for (let tc = 0; tc < frozenCols; tc++) {
+    for (let tr = fromRow; tr <= toRow; tr++) wanted.push(tileKey(tr, tc));
   }
   requestTiles(wanted);
 }
@@ -316,15 +540,29 @@ function render() {
   for (let col = view.firstCol; col < view.lastCol; col++) {
     const active = col === state.selection.col ? " is-active" : "";
     colParts.push(
-      `<div class="colhead${active}" style="left:${col * COL_W}px;width:${COL_W}px">${columnName(col)}</div>`
+      `<div class="colhead${active}" style="left:${geom.xs[col]}px;width:${colWidth(
+        col
+      )}px">${columnName(col)}</div>`
     );
   }
 
+  // The header row is named in the strip, so "which row is pinned" can be
+  // answered without scrolling to it, and a click on any number moves the pin.
+  const header = pinnedRow();
+  const pinHint = isTextTable() ? ' title="Click to pin this row as the header"' : "";
   const rowParts = [];
   for (let row = view.firstRow; row < view.lastRow; row++) {
     const active = row === state.selection.row ? " is-active" : "";
+    const pinned = row === header;
+    const title = pinned
+      ? ' title="Header row — click to unpin it"'
+      : isTextTable()
+        ? pinHint
+        : "";
     rowParts.push(
-      `<div class="rowhead${active}" style="top:${row * ROW_H}px;height:${ROW_H}px">${row + 1}</div>`
+      `<div class="rowhead${active}${pinned ? " is-pinned" : ""}"${title} data-row="${row}" style="top:${
+        geom.ys[row]
+      }px;height:${rowHeight(row)}px">${row + 1}</div>`
     );
   }
 
@@ -333,39 +571,251 @@ function render() {
 
   const cellParts = [];
   for (let row = view.firstRow; row < view.lastRow; row++) {
-    const top = row * ROW_H;
     for (let col = view.firstCol; col < view.lastCol; col++) {
-      const left = col * COL_W;
-      const cell = cellAt(row, col);
-      if (cell === undefined) {
-        cellParts.push(
-          `<div class="cell pending" style="left:${left}px;top:${top}px;width:${COL_W}px;height:${ROW_H}px"></div>`
-        );
-        continue;
-      }
-      if (cell === null) continue;
-      const text = cell[1];
-      if (text === "") continue;
-      const title = text.length > 24 ? ` title="${esc(text)}"` : "";
-      cellParts.push(
-        `<div class="cell k-${cell[0]}"${title} style="left:${left}px;top:${top}px;width:${COL_W}px;height:${ROW_H}px">${esc(text)}</div>`
-      );
+      cellParts.push(cellMarkup(cellAt(row, col), row, col));
     }
   }
 
+  const box = selectionBox();
   cellParts.push(
-    `<div class="selection" style="left:${state.selection.col * COL_W}px;top:${
-      state.selection.row * ROW_H
-    }px;width:${COL_W}px;height:${ROW_H}px"></div>`
+    `<div class="selection" style="left:${box.left}px;top:${box.top}px;width:${box.width}px;height:${box.height}px"></div>`
   );
   els.cells.innerHTML = cellParts.join("");
+
+  renderFrozenRow(view);
+  renderFreezePanes(view);
+}
+
+/**
+ * One cell as markup: a pending block, nothing for an empty, or the value.
+ *
+ * A merged region is drawn once, from its anchor, at the size of the whole
+ * span; every other cell it covers is left empty so the anchor's border is the
+ * only grid line inside it. The line height is set inline so text still sits
+ * centred in a row the sheet made taller.
+ */
+function cellMarkup(cell, row, col, maxBottom = Infinity, topOffset = 0) {
+  const merge = mergeAt(row, col);
+  if (!merge && mergeOrigin(row, col)) return "";
+
+  const right = merge ? Math.min(col + merge.cols, geom.cols) : col + 1;
+  const bottom = merge ? Math.min(row + merge.rows, geom.rows, maxBottom) : row + 1;
+  const left = geom.xs[col];
+  // `topOffset` puts a row at the top of its own layer: the pinned strip is
+  // one row tall, so a header deeper in the sheet would otherwise be clipped
+  // out of it.
+  const top = geom.ys[row] - topOffset;
+  const width = geom.xs[right] - left;
+  const height = geom.ys[bottom] - geom.ys[row];
+  const box = `left:${left}px;top:${top}px;width:${width}px;height:${height}px;line-height:${Math.max(
+    11,
+    height - 1
+  )}px`;
+
+  if (cell === undefined) {
+    return `<div class="cell pending" style="${box}"></div>`;
+  }
+  if (cell === null) return "";
+  const text = cell[1];
+  if (text === "") return "";
+  const title = text.length > 24 ? ` title="${esc(text)}"` : "";
+  return `<div class="cell k-${cell[0]}"${title} style="${box}">${esc(text)}</div>`;
+}
+
+/**
+ * Paint the chosen header above the scrolled body, or hide it.
+ *
+ * It takes over from the first pixel past the header's own top edge: the real
+ * row is still in place underneath at that point, so the swap does not jump,
+ * and anything above the header - a title, a note about the export - scrolls
+ * away before it pins. A workbook is left alone; its rows are data, not
+ * necessarily a table.
+ */
+function renderFrozenRow(view) {
+  const header = pinnedRow();
+  const show =
+    header !== null && realRows() > header + 1 && view.scrollTop > geom.ys[header];
+  els.frozenViewport.hidden = !show;
+  els.frozenCorner.hidden = !show;
+  if (!show) return;
+
+  els.frozenCorner.textContent = String(header + 1);
+  els.frozen.style.transform = `translateX(${-view.scrollLeft}px)`;
+  const parts = [];
+  // A header cell merged into the rows below it is drawn to the bottom of the
+  // strip rather than to the bottom of its whole region, which the strip clips.
+  for (let col = view.firstCol; col < view.lastCol; col++) {
+    parts.push(cellMarkup(cellAt(header, col), header, col, header + 1, geom.ys[header]));
+  }
+  // The selection is in the body layer, so it scrolls away with the row it
+  // surrounds. When that row is the pinned one, the highlight has to be pinned
+  // too or the grid would look like nothing is selected.
+  if (state.selection.row === header) {
+    const box = selectionBox();
+    parts.push(
+      `<div class="selection" style="left:${box.left}px;top:0;width:${box.width}px;height:${rowHeight(
+        header
+      )}px"></div>`
+    );
+  }
+  els.frozen.innerHTML = parts.join("");
+  els.frozenCorner.classList.toggle("is-active", state.selection.row === header);
+}
+
+/** Cells for a rectangle of the sheet, as the pane that owns them sees it. */
+function paneCells(rowStart, rowEnd, colStart, colEnd) {
+  const parts = [];
+  for (let row = rowStart; row < rowEnd; row++) {
+    for (let col = colStart; col < colEnd; col++) {
+      parts.push(cellMarkup(cellAt(row, col), row, col));
+    }
+  }
+  return parts.join("");
+}
+
+/** The selection outline, in sheet coordinates, for a pane to clip. */
+function paneSelection() {
+  const box = selectionBox();
+  return `<div class="selection" style="left:${box.left}px;top:${box.top}px;width:${box.width}px;height:${box.height}px"></div>`;
+}
+
+/** Column letters and row numbers for the frozen bands. */
+function renderFreezeHeaders(freeze) {
+  const activeRow = state.selection.row;
+  const activeCol = state.selection.col;
+
+  const colParts = [];
+  const lastCol = Math.min(freeze.cols, colAtX(els.body.clientWidth) + 1);
+  for (let col = 0; col < lastCol; col++) {
+    const active = col === activeCol ? " is-active" : "";
+    colParts.push(
+      `<div class="colhead${active}" style="left:${geom.xs[col]}px;width:${colWidth(
+        col
+      )}px">${columnName(col)}</div>`
+    );
+  }
+  els.freezeColsHead.innerHTML = colParts.join("");
+
+  const rowParts = [];
+  const lastRow = Math.min(freeze.rows, rowAtY(els.body.clientHeight) + 1);
+  for (let row = 0; row < lastRow; row++) {
+    const active = row === activeRow ? " is-active" : "";
+    rowParts.push(
+      `<div class="rowhead${active}" style="top:${geom.ys[row]}px;height:${rowHeight(
+        row
+      )}px">${row + 1}</div>`
+    );
+  }
+  els.freezeRowsHead.innerHTML = rowParts.join("");
+}
+
+/**
+ * Draw the four frozen panes over the body.
+ *
+ * The corner is fixed; the top pane follows horizontal scrolling and the left
+ * pane follows vertical scrolling. Each is clipped to its band, so the cells
+ * that scroll underneath it disappear exactly where the freeze ends.
+ */
+function renderFreezePanes(view) {
+  const freeze = frozenCounts();
+  const showRows = freeze.rows > 0;
+  const showCols = freeze.cols > 0;
+  els.freezeTop.hidden = !showRows;
+  els.freezeLeft.hidden = !showCols;
+  els.freezeCorner.hidden = !showRows || !showCols;
+  els.freezeColsHead.hidden = !showCols;
+  els.freezeRowsHead.hidden = !showRows;
+  if (!showRows && !showCols) return;
+
+  renderFreezeHeaders(freeze);
+  const selection = paneSelection();
+  const size = frozenSize(freeze);
+
+  // Only the part of a frozen band that fits on screen needs cells; a band
+  // taller than the window is clipped at the same place either way.
+  const visibleRows = Math.min(freeze.rows, rowAtY(els.body.clientHeight) + 1);
+  const visibleCols = Math.min(freeze.cols, colAtX(els.body.clientWidth) + 1);
+
+  if (showRows) {
+    const fromCol = Math.max(freeze.cols, view.firstCol);
+    els.freezeTopCells.innerHTML =
+      paneCells(0, visibleRows, fromCol, view.lastCol) + selection;
+    // The pane starts after the frozen columns, so its content has to move by
+    // the frozen width as well as by the body's scroll offset.
+    els.freezeTopCells.style.transform = `translateX(${-(view.scrollLeft + size.width)}px)`;
+  } else {
+    els.freezeTopCells.innerHTML = "";
+  }
+
+  if (showCols) {
+    const fromRow = Math.max(freeze.rows, view.firstRow);
+    els.freezeLeftCells.innerHTML =
+      paneCells(fromRow, view.lastRow, 0, visibleCols) + selection;
+    els.freezeLeftCells.style.transform = `translateY(${-(view.scrollTop + size.height)}px)`;
+  } else {
+    els.freezeLeftCells.innerHTML = "";
+  }
+
+  if (showRows && showCols) {
+    els.freezeCornerCells.innerHTML =
+      paneCells(0, visibleRows, 0, visibleCols) + selection;
+  } else {
+    els.freezeCornerCells.innerHTML = "";
+  }
 }
 
 function layoutSheet() {
-  els.cells.style.width = `${gridCols() * COL_W}px`;
-  els.cells.style.height = `${gridRows() * ROW_H}px`;
-  els.cols.style.width = `${gridCols() * COL_W}px`;
-  els.rows.style.height = `${gridRows() * ROW_H}px`;
+  els.cells.style.width = `${geom.xs[geom.cols]}px`;
+  els.cells.style.height = `${geom.ys[geom.rows]}px`;
+  els.cols.style.width = `${geom.xs[geom.cols]}px`;
+  els.rows.style.height = `${geom.ys[geom.rows]}px`;
+  // The pinned strip is a copy of the header row, so it follows that row's
+  // height when the sheet sizes it.
+  const header = pinnedRow();
+  const pinned = header === null ? ROW_H : rowHeight(header);
+  els.frozenViewport.style.height = `${pinned}px`;
+  els.frozenCorner.style.height = `${pinned}px`;
+  els.frozen.style.height = `${pinned}px`;
+  // The pinned row is painted over the body, so stop it at the body's vertical
+  // scrollbar rather than covering the top of it.
+  els.frozenViewport.style.right = `${els.body.offsetWidth - els.body.clientWidth}px`;
+
+  // The frozen panes sit exactly over the bands of the body they replace. The
+  // body's own offsets are the row-header and column-header sizes.
+  const freeze = frozenCounts();
+  const size = frozenSize(freeze);
+  const scrollX = els.body.offsetWidth - els.body.clientWidth;
+  const scrollY = els.body.offsetHeight - els.body.clientHeight;
+  const left = els.body.offsetLeft;
+  const top = els.body.offsetTop;
+
+  els.freezeTop.hidden = freeze.rows === 0;
+  els.freezeLeft.hidden = freeze.cols === 0;
+  els.freezeCorner.hidden = freeze.rows === 0 || freeze.cols === 0;
+  els.freezeColsHead.hidden = freeze.cols === 0;
+  els.freezeRowsHead.hidden = freeze.rows === 0;
+  if (freeze.rows === 0 && freeze.cols === 0) return;
+
+  els.freezeTop.style.left = `${left + size.width}px`;
+  els.freezeTop.style.top = `${top}px`;
+  els.freezeTop.style.right = `${scrollX}px`;
+  els.freezeTop.style.height = `${size.height}px`;
+  els.freezeLeft.style.left = `${left}px`;
+  els.freezeLeft.style.top = `${top + size.height}px`;
+  els.freezeLeft.style.width = `${size.width}px`;
+  els.freezeLeft.style.bottom = `${scrollY}px`;
+  els.freezeCorner.style.left = `${left}px`;
+  els.freezeCorner.style.top = `${top}px`;
+  els.freezeCorner.style.width = `${size.width}px`;
+  els.freezeCorner.style.height = `${size.height}px`;
+  els.freezeColsHead.style.left = `${left}px`;
+  els.freezeColsHead.style.top = "0px";
+  els.freezeColsHead.style.width = `${size.width}px`;
+  els.freezeColsHead.style.height = `${top}px`;
+  els.freezeRowsHead.style.left = "0px";
+  els.freezeRowsHead.style.top = `${top}px`;
+  els.freezeRowsHead.style.width = `${left}px`;
+  els.freezeRowsHead.style.height = `${size.height}px`;
 }
 
 // --------------------------------------------------------------------------
@@ -373,22 +823,68 @@ function layoutSheet() {
 // --------------------------------------------------------------------------
 
 function select(row, col, { scrollIntoView = false } = {}) {
+  // Every cell of a merged region is the same cell: selecting a covered one
+  // selects the region's anchor, so the readout and the outline agree.
+  const origin = mergeOrigin(row, col);
+  if (origin) {
+    row = origin.row;
+    col = origin.col;
+  }
   state.selection.row = clamp(row, 0, Math.max(realRows() - 1, 0));
   state.selection.col = clamp(col, 0, Math.max(realCols() - 1, 0));
   updateReadout();
 
   if (scrollIntoView) {
     const body = els.body;
-    const x = state.selection.col * COL_W;
-    const y = state.selection.row * ROW_H;
-    if (x < body.scrollLeft) body.scrollLeft = x;
-    else if (x + COL_W > body.scrollLeft + body.clientWidth)
-      body.scrollLeft = x + COL_W - body.clientWidth;
-    if (y < body.scrollTop) body.scrollTop = y;
-    else if (y + ROW_H > body.scrollTop + body.clientHeight)
-      body.scrollTop = y + ROW_H - body.clientHeight;
+    const box = selectionBox();
+    const freeze = frozenCounts();
+    const size = frozenSize(freeze);
+
+    // A frozen row or column is already on screen; scrolling to it would move
+    // the body for no reason. Otherwise the visible band starts after the
+    // frozen one, and that is the edge the cell has to clear.
+    if (state.selection.col >= freeze.cols) {
+      const left = body.scrollLeft + size.width;
+      if (box.left < left) body.scrollLeft = box.left - size.width;
+      else if (box.left + box.width > body.scrollLeft + body.clientWidth)
+        body.scrollLeft = box.left + box.width - body.clientWidth;
+    }
+    if (state.selection.row >= freeze.rows) {
+      const top = body.scrollTop + size.height;
+      if (box.top < top) body.scrollTop = box.top - size.height;
+      else if (box.top + box.height > body.scrollTop + body.clientHeight)
+        body.scrollTop = box.top + box.height - body.clientHeight;
+    }
   }
   scheduleRender();
+}
+
+/**
+ * Turn a pointer position into a cell, honouring the frozen bands.
+ *
+ * Inside the frozen width or height the sheet coordinate is the viewport
+ * coordinate; outside it, the body's scroll offset applies.
+ */
+function selectAtPoint(event) {
+  if (!state.info) return;
+  const rect = els.body.getBoundingClientRect();
+  const x = clamp(event.clientX - rect.left, 0, Math.max(rect.width - 1, 0));
+  const y = clamp(event.clientY - rect.top, 0, Math.max(rect.height - 1, 0));
+  const freeze = frozenCounts();
+  const size = frozenSize(freeze);
+  const col = colAtX(x < size.width ? x : x + els.body.scrollLeft);
+  const row = rowAtY(y < size.height ? y : y + els.body.scrollTop);
+  select(row, col);
+}
+
+/** A wheel event over a frozen pane still scrolls the body behind it. */
+function scrollFromPane(event) {
+  const body = els.body;
+  const unit =
+    event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? body.clientHeight : 1;
+  if (event.deltaX) body.scrollLeft += event.deltaX * unit;
+  if (event.deltaY) body.scrollTop += event.deltaY * unit;
+  if (event.deltaX || event.deltaY) event.preventDefault();
 }
 
 function updateReadout() {
@@ -445,12 +941,55 @@ function legacyCopy(text, done) {
 // Opening and closing files
 // --------------------------------------------------------------------------
 
-async function openPath(path) {
+/**
+ * The header row to pin after opening.
+ *
+ * A text table opened for the first time pins its first record, which is the
+ * convention the bar is built on. Re-reading the same file with another
+ * delimiter keeps whatever was chosen, including "nothing": the choice is the
+ * user's, and a re-read is not a new file.
+ */
+function headerAfterOpen(info, previous) {
+  if (!info.text) return null;
+  if (previous === null) return null;
+  const rows = info.sheets.length ? info.sheets[0].rows : 0;
+  return Number.isInteger(previous) && previous < rows ? previous : 0;
+}
+
+/**
+ * Open a file, optionally reading a delimited one the way the user chose.
+ *
+ * A text table is re-read from disk when the delimiter or encoding changes:
+ * the parse is the thing that was wrong, so there is nothing to patch in the
+ * cells already in memory. Any other format ignores the dialect.
+ */
+async function openPath(path, dialect = { delimiter: "", encoding: "" }, { explicit = false } = {}) {
   if (!path) return;
   setBusy(true, "Reading…");
+  // Captured before the await: a second open of the same file must not read
+  // the state the first one is about to replace.
+  const previousHeader = state.info && state.info.path === path ? state.headerRow : undefined;
   try {
-    const info = await invoke("open_workbook", { path });
+    const info = await invoke("open_workbook", {
+      path,
+      delimiter: dialect.delimiter || null,
+      encoding: dialect.encoding || null,
+      dialectExplicit: explicit,
+    });
     state.info = info;
+    state.text = { delimiter: dialect.delimiter, encoding: dialect.encoding };
+    // A choice remembered from an earlier open comes back from the Rust side
+    // rather than from this call, so the selects have to be told about it: a
+    // re-read must go on using what the bar says.
+    if (info.text) {
+      if (!state.text.delimiter && info.text.delimiterChosen) {
+        state.text.delimiter = info.text.delimiter;
+      }
+      if (!state.text.encoding && info.text.encodingChosen) {
+        state.text.encoding = ENCODING_VALUES[info.text.encoding] || "";
+      }
+    }
+    state.headerRow = headerAfterOpen(info, previousHeader);
     state.sheet = 0;
     resetTiles();
     state.selection.row = 0;
@@ -462,13 +1001,24 @@ async function openPath(path) {
     els.body.scrollLeft = 0;
 
     buildTabs();
+    rebuildGeometry();
     layoutSheet();
     updateStatus();
+    updateTextBar();
     updateReadout();
     scheduleRender();
 
     if (info.truncated) {
       flash("Very large workbook: only the first part of it was loaded.", true);
+    } else if (explicit && info.text) {
+      // A choice made in the bar is also the one the next open starts from, so
+      // say which way it went: remembered, or back to detection.
+      const auto = !state.text.delimiter && !state.text.encoding;
+      flash(
+        auto
+          ? `Read as ${info.text.delimiter} · ${info.text.encoding}; detection is back.`
+          : `Read as ${info.text.delimiter} · ${info.text.encoding}; remembered for this file.`
+      );
     } else {
       flash(`Opened ${info.fileName}`);
     }
@@ -496,6 +1046,22 @@ async function chooseFile() {
 
 function closeWorkbook() {
   state.info = null;
+  state.text = { delimiter: "", encoding: "" };
+  state.headerRow = null;
+  els.frozenViewport.hidden = true;
+  els.frozenCorner.hidden = true;
+  els.frozen.innerHTML = "";
+  for (const pane of [els.freezeTop, els.freezeLeft, els.freezeCorner]) pane.hidden = true;
+  els.freezeColsHead.hidden = true;
+  els.freezeRowsHead.hidden = true;
+  for (const cells of [
+    els.freezeTopCells,
+    els.freezeLeftCells,
+    els.freezeCornerCells,
+  ]) {
+    cells.innerHTML = "";
+  }
+  updateTextBar();
   closeTrust();
   resetTiles();
   els.viewer.hidden = true;
@@ -553,6 +1119,7 @@ function setSheet(index) {
   els.body.scrollTop = 0;
   els.body.scrollLeft = 0;
   buildTabs();
+  rebuildGeometry();
   layoutSheet();
   updateStatus();
   updateReadout();
@@ -583,6 +1150,102 @@ function updateStatus() {
     bits.push(`data starts at row ${(sheet.firstUsedRow + 1).toLocaleString()}`);
   }
   els.statusCells.textContent = bits.join("  ·  ");
+}
+
+// --------------------------------------------------------------------------
+// Delimited text: the delimiter and the encoding, which a file cannot say
+// --------------------------------------------------------------------------
+
+/** The select value for an encoding name the Rust side reports. */
+const ENCODING_VALUES = {
+  "UTF-8": "utf-8",
+  "Windows-1252": "windows-1252",
+  "UTF-16 LE": "utf-16le",
+  "UTF-16 BE": "utf-16be",
+};
+
+/**
+ * Show or hide the text bar, and say what the open file was read with.
+ *
+ * The selects hold the user's choice rather than the detected value: an
+ * `<option>` cannot say "Auto (comma)", and the line beside them is where the
+ * answer belongs. Choosing "Auto" again puts the guess back.
+ */
+function updateTextBar() {
+  const text = state.info && state.info.text;
+  els.textbar.hidden = !text;
+  // Only a text table has a row to pin, so only its row numbers invite a click.
+  els.viewer.classList.toggle("is-text", Boolean(text));
+  if (!text) {
+    els.textDetected.textContent = "";
+    els.textHint.hidden = true;
+    els.textHeader.value = "";
+    els.textHeader.disabled = true;
+    return;
+  }
+  els.textDelimiter.value = state.text.delimiter;
+  els.textEncoding.value = state.text.encoding;
+  const row = pinnedRow();
+  els.textHeader.disabled = realRows() === 0;
+  els.textHeader.max = String(Math.max(realRows(), 1));
+  els.textHeader.value = row === null ? "" : String(row + 1);
+  els.textDetected.textContent = `Read as ${text.delimiter} · ${text.encoding}`;
+  els.textHint.hidden = !text.undecodable;
+  els.textHint.textContent = text.undecodable
+    ? "Some characters did not decode — try another encoding."
+    : "";
+}
+
+/** Re-read the open text file with the delimiter and encoding now selected. */
+async function applyTextDialect() {
+  if (!state.info || !state.info.text) return;
+  await openPath(
+    state.info.path,
+    {
+      delimiter: els.textDelimiter.value,
+      encoding: els.textEncoding.value,
+    },
+    // Only a choice made here is remembered for the file; Reload and the first
+    // open leave the store alone.
+    { explicit: true }
+  );
+}
+
+/**
+ * Pin `row` as the header, or nothing.
+ *
+ * The pinned strip is a copy of one row drawn over the body, so moving it is a
+ * layout change rather than a re-read: nothing touches the file and the tiles
+ * already in memory stay valid.
+ */
+function setHeaderRow(row) {
+  if (!isTextTable()) return;
+  const rows = realRows();
+  const next = Number.isInteger(row) && row >= 0 && row < rows ? row : null;
+  state.headerRow = next;
+  updateTextBar();
+  layoutSheet();
+  scheduleRender();
+  if (next === null) flash("Header unpinned.");
+  else flash(`Row ${(next + 1).toLocaleString()} is the header, pinned while the rest scrolls.`);
+}
+
+/** Take the header row from the bar's field: empty unpins it. */
+function applyHeaderInput() {
+  if (!isTextTable()) return;
+  const raw = els.textHeader.value.trim();
+  if (raw === "") {
+    setHeaderRow(null);
+    return;
+  }
+  const rows = realRows();
+  const row = Number(raw);
+  if (!Number.isInteger(row) || row < 1 || row > rows) {
+    flash(`Header row must be a whole number from 1 to ${rows.toLocaleString()}.`, true);
+    updateTextBar();
+    return;
+  }
+  setHeaderRow(row - 1);
 }
 
 // --------------------------------------------------------------------------
@@ -1111,8 +1774,10 @@ function initEvents() {
   els.btnOpen.addEventListener("click", chooseFile);
   els.btnOpen2.addEventListener("click", chooseFile);
   els.btnExport.addEventListener("click", exportOds);
+  // Reload keeps the text dialect: re-reading the file should not silently
+  // undo the delimiter and encoding the user picked for it.
   els.btnReload.addEventListener("click", () => {
-    if (state.info) openPath(state.info.path);
+    if (state.info) openPath(state.info.path, state.text);
   });
   els.btnSettings.addEventListener("click", openSettings);
 
@@ -1163,19 +1828,32 @@ function initEvents() {
     if (button) setSheet(Number(button.dataset.sheet));
   });
 
+  els.textDelimiter.addEventListener("change", applyTextDialect);
+  els.textEncoding.addEventListener("change", applyTextDialect);
+  els.textHeader.addEventListener("change", applyHeaderInput);
+  // Any row number can be the header: pointing at the row is how a table with
+  // a title above its column names is fixed. Clicking the pin again releases it.
+  els.rows.addEventListener("click", (event) => {
+    const head = event.target.closest(".rowhead");
+    if (!head || !isTextTable()) return;
+    const row = Number(head.dataset.row);
+    setHeaderRow(row === state.headerRow ? null : row);
+  });
+
   els.body.addEventListener("scroll", scheduleRender, { passive: true });
   window.addEventListener("resize", () => {
     layoutSheet();
     scheduleRender();
   });
 
-  els.cells.addEventListener("mousedown", (event) => {
-    if (!state.info) return;
-    const rect = els.cells.getBoundingClientRect();
-    const col = Math.floor((event.clientX - rect.left) / COL_W);
-    const row = Math.floor((event.clientY - rect.top) / ROW_H);
-    select(row, col);
-  });
+  // Hit-test through the prefix sums: a click lands in the column whose width
+  // it falls in, not at a fixed 112-pixel stride. The frozen panes share the
+  // same mapping, with their own fixed edge for the frozen band.
+  els.cells.addEventListener("mousedown", selectAtPoint);
+  for (const pane of [els.freezeTop, els.freezeLeft, els.freezeCorner]) {
+    pane.addEventListener("mousedown", selectAtPoint);
+    pane.addEventListener("wheel", scrollFromPane, { passive: false });
+  }
 
   document.addEventListener("keydown", onKeyDown);
 
@@ -1205,12 +1883,27 @@ function initEvents() {
 }
 
 function onKeyDown(event) {
+  // A field in the chrome owns its keys: typing a row number must not also
+  // move the selection, and Ctrl+C in one must copy its text.
+  const field = event.target instanceof HTMLElement && event.target.closest("input, select, textarea");
   if (event.key === "Escape") {
     closeUpdateConfirm();
     closeSettings();
     closeTrust();
+    // Escape leaves a field without committing it: the header goes back to the
+    // row that is actually pinned, and the blur that follows has nothing to
+    // change.
+    if (field instanceof HTMLElement) {
+      event.preventDefault();
+      if (field === els.textHeader) {
+        const row = pinnedRow();
+        els.textHeader.value = row === null ? "" : String(row + 1);
+      }
+      field.blur();
+    }
     return;
   }
+  if (field) return;
   if (!state.info || !els.settings.hidden || !els.trust.hidden) return;
   if (event.ctrlKey && event.key.toLowerCase() === "o") {
     event.preventDefault();
@@ -1228,12 +1921,29 @@ function onKeyDown(event) {
   }
 
   const { row, col } = state.selection;
-  const pageRows = Math.max(1, Math.floor(els.body.clientHeight / ROW_H) - 1);
+  // A page is however many rows fit between the top of the body and its
+  // bottom now, which varies with the heights the sheet gave them.
+  const frozenHeight = frozenSize().height;
+  const pageRows = Math.max(
+    1,
+    rowAtY(els.body.scrollTop + els.body.clientHeight) -
+      rowAtY(els.body.scrollTop + frozenHeight) -
+      1
+  );
+  // An arrow key leaves a merged region as a whole, rather than landing on a
+  // cell the region hides and being snapped back to its anchor.
+  const step = (dr, dc) => {
+    const span = mergeAt(row, col) || { rows: 1, cols: 1 };
+    return [
+      dr > 0 ? row + span.rows : dr < 0 ? row - 1 : row,
+      dc > 0 ? col + span.cols : dc < 0 ? col - 1 : col,
+    ];
+  };
   const movements = {
-    ArrowUp: [row - 1, col],
-    ArrowDown: [row + 1, col],
-    ArrowLeft: [row, col - 1],
-    ArrowRight: [row, col + 1],
+    ArrowUp: step(-1, 0),
+    ArrowDown: step(1, 0),
+    ArrowLeft: step(0, -1),
+    ArrowRight: step(0, 1),
     PageUp: [row - pageRows, col],
     PageDown: [row + pageRows, col],
     Home: [row, 0],

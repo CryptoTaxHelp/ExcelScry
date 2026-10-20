@@ -12,7 +12,8 @@
   --green: #22c55e;
   --amber: #fbbf24;
 
-  /* Grid metrics. Kept in sync with --grid-row-h / --grid-col-w in app.js. */
+  /* Fallback grid metrics. A sheet with its own sizes overrides them per
+     column and row; app.js reads these as the defaults. */
   --rowh: 24px;
   --colw: 112px;
   --rowhead-w: 58px;
@@ -88,6 +89,110 @@ body {
   font-size: 15px;
   font-weight: 650;
   letter-spacing: 0.2px;
+}
+
+/* The delimiter/encoding bar, shown only for a delimited text file. It sits
+   between the toolbar and the grid rather than inside the toolbar: it appears
+   and disappears, and the toolbar should not reflow when it does. */
+.textbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  height: 36px;
+  padding: 0 12px;
+  flex: 0 0 auto;
+  background: var(--chrome);
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.textbar-title {
+  font-size: 10px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  opacity: 0.8;
+}
+
+.textbar-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.textbar-field > span {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+/* `appearance: none` and the arrow below, because a native select draws its
+   arrow for a light page and it disappears against this chrome. */
+.textbar select {
+  appearance: none;
+  -webkit-appearance: none;
+  background-color: #1b2942;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%238fa2bd' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 6px center;
+  background-size: 9px;
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 3px 22px 3px 8px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.textbar select:hover {
+  border-color: #3b4d70;
+}
+
+.textbar select:focus-visible,
+.textbar input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* The header row, by number. A spinner would only repeat what the row strip
+   already says, and it draws for a light page. */
+.textbar input {
+  appearance: textfield;
+  -moz-appearance: textfield;
+  width: 58px;
+  background: #1b2942;
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 3px 8px;
+  font: inherit;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.textbar input::-webkit-inner-spin-button,
+.textbar input::-webkit-outer-spin-button {
+  appearance: none;
+  margin: 0;
+}
+
+.textbar input:hover {
+  border-color: #3b4d70;
+}
+
+.textbar input::placeholder {
+  color: var(--text-dim);
+  opacity: 0.7;
+}
+
+.textbar-detected {
+  color: var(--text-dim);
+}
+
+.textbar-hint {
+  color: var(--amber);
 }
 
 .toolbar-spacer {
@@ -275,6 +380,7 @@ body {
 }
 
 .sheet {
+  position: relative;
   flex: 1 1 auto;
   min-height: 0;
   display: grid;
@@ -360,6 +466,24 @@ body {
   color: #1e4569;
 }
 
+/* A text table's row numbers are the way to choose its header, and the chosen
+   one is marked in the strip as well as held above the body. */
+.viewer.is-text .rowhead {
+  cursor: pointer;
+}
+
+.viewer.is-text .rowhead:hover {
+  background: #e4eef9;
+}
+
+.rowhead.is-pinned {
+  background: #dceaf7;
+  color: #1e4569;
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+
+
 .body {
   grid-column: 2;
   grid-row: 2;
@@ -415,6 +539,108 @@ body {
 .cell.k-d,
 .cell.k-t {
   color: #4338ca;
+}
+
+/* The pinned header row of a text table. It sits over the top of the body
+   rather than in the grid's tracks, so showing it does not reflow the sheet;
+   the inner layer is translated horizontally with the body's scroll, exactly
+   as the column strip is. */
+.frozen-viewport {
+  position: absolute;
+  top: var(--colhead-h);
+  left: var(--rowhead-w);
+  right: 0;
+  height: var(--rowh);
+  overflow: hidden;
+  pointer-events: none;
+  background: var(--sheet-bg);
+  border-bottom: 1px solid #cfd8e3;
+  z-index: 3;
+}
+
+.frozen {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: var(--rowh);
+}
+
+/* The row's own number, pinned with it: the head strip behind scrolls away
+   with its siblings, and a frozen row without a number reads as row 2. */
+.frozen-corner {
+  position: absolute;
+  top: var(--colhead-h);
+  left: 0;
+  width: var(--rowhead-w);
+  height: var(--rowh);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--sheet-head);
+  border-right: 1px solid #cfd8e3;
+  border-bottom: 1px solid #d6dee8;
+  color: var(--sheet-head-text);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+  z-index: 4;
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.frozen-corner.is-active {
+  background: #dceaf7;
+  color: #1e4569;
+}
+
+/* Frozen rows and columns from the workbook. Each pane is a clipped layer
+   over the body; the corner does not move, the top pane follows horizontal
+   scrolling and the left pane follows vertical scrolling. */
+.freeze-pane {
+  position: absolute;
+  overflow: hidden;
+  background: var(--sheet-bg);
+  z-index: 3;
+}
+
+.freeze-inner {
+  position: absolute;
+  top: 0;
+  left: 0;
+}
+
+.freeze-corner {
+  z-index: 4;
+  border-right: 1px solid #cfd8e3;
+  border-bottom: 1px solid #cfd8e3;
+}
+
+.freeze-top {
+  border-bottom: 1px solid #cfd8e3;
+}
+
+.freeze-left {
+  border-right: 1px solid #cfd8e3;
+}
+
+/* The labels above and beside the frozen panes have to stay put too, or the
+   frozen cells would sit under a strip that had scrolled away. */
+.freeze-cols-head,
+.freeze-rows-head {
+  position: absolute;
+  overflow: hidden;
+  background: var(--sheet-head);
+  z-index: 5;
+}
+
+.freeze-cols-head {
+  border-right: 1px solid #cfd8e3;
+  border-bottom: 1px solid #cfd8e3;
+}
+
+.freeze-rows-head {
+  border-right: 1px solid #cfd8e3;
+  border-bottom: 1px solid #cfd8e3;
 }
 
 /* Cells whose tile has not arrived yet. */

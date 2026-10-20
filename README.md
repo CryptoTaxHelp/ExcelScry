@@ -21,6 +21,26 @@ registers ExcelScry with Windows' Default Apps list.
   *Unicode Text* export writes). A `.csv` that uses `;` or a tab instead of a
   comma is recognised from its first record. Values stay text — `000123` and
   `1E5` are shown as the file spells them rather than reparsed as numbers.
+  The bytes settle the encoding before the first record is read: UTF-8 when
+  they are UTF-8, UTF-16 either way round with or without a byte order mark
+  (the zero byte beside every character gives a Windows tool's export away),
+  and Windows-1252 when they are not UTF-8 at all — so a legacy file's
+  accented names open correctly without touching anything. A delimiter that
+  reads either way is still a guess, and a bar above the grid names the
+  delimiter and encoding the file was read with and can re-read it with
+  another: comma, semicolon, tab or pipe; UTF-8, Windows-1252 or UTF-16 either
+  way round. Reload keeps the choice, and Auto puts the guess back. A choice is
+  remembered for the file it was made for, so the weekly export that arrives
+  semicolon-separated is opened that way next week without touching the bar;
+  choosing Auto forgets it again. The first record
+  stays pinned above the grid as you scroll — in a delimited file that row is
+  the header, and its row number rides along with it. A file exported with a
+  title or a note above its column names can name another row instead: the
+  bar's *Header row* field, or a click on that row's number, moves the pin, and
+  everything above the chosen row scrolls away with the rest. Clearing the
+  field, or clicking the chosen number again, leaves nothing pinned; the
+  choice survives a reload or another delimiter, because it belongs to the open
+  file rather than to its bytes.
 - **Says what the file carries before you open it elsewhere.** A badge in the
   status bar reports macros, external links, external data connections,
   embedded objects and ActiveX controls, and opens a dialog with the detail.
@@ -29,13 +49,23 @@ registers ExcelScry with Windows' Default Apps list.
   and the inspector only reads the package's member list. That makes ExcelScry
   a safe way to look inside a workbook from a source you do not trust, and
   `.xlsm` gets the same shell registration as the other Excel formats.
+- **Frozen rows and columns stay in place.** A workbook that freezes its
+  header row, its label column or both keeps that band on screen while the
+  rest of the sheet scrolls, with the frozen row numbers and column letters
+  pinned alongside it. Excel stores the split in the sheet's `<pane>` element;
+  LibreOffice stores it in the ODS view settings, and both are read. Clicking,
+  arrow keys and scrolling all work across the frozen boundary; a text table's
+  chosen header row remains a separate pin.
 - **Viewing an `.ods` is not a lesser mode.** Times of day stored the ODF way
   (`office:time-value`) are read as clock times rather than as their raw
   duration string, spans longer than a day keep rendering as `36:00:00`, and a
   table that starts below row 1 keeps its row offset.
 - **Exports** the open workbook to `.ods` with values kept as real numbers,
   dates, times, booleans and strings, so the result opens as a genuine
-  spreadsheet rather than a wall of text. The first used row is styled bold.
+  spreadsheet rather than a wall of text. Bold, italic, text and fill colours,
+  the sheet's column widths and row heights, and its merged regions travel with
+  it, as do a format's negative and zero sections and their colours, and the
+  first used row is styled bold.
 - **Cells are shown with the number format the workbook gives them.** Money as
   `$23,988.00` or `[$€-407] #,##0.00`, percentages as `35.0%`, dates as
   `15/01/2026` or `January 9, 2026`, times as `09:30` and elapsed spans past a
@@ -193,7 +223,11 @@ ExcelScry.exe "C:\path\book.xlsx"   # open a workbook straight away
 
 - **Open file** / `Ctrl+O` — choose a workbook.
 - **Export to ODS** — writes an `.ods` next to the original (you can pick a
-  different location and the extension is corrected for you).
+  different location and the extension is corrected for you). Each cell keeps
+  its number format — money stays money, dates stay dates, percentages stay
+  percentages — and its bold/italic, text colour, fill, column width and row
+  height. Merged regions stay merged, and a blank column at the edge of the
+  report keeps its width.
 - **Reload** — re-read the file from disk.
 - Arrow keys, `PageUp`/`PageDown`, `Home`/`End` — move the selection.
 - `Ctrl+C` — copy the selected cell's text.
@@ -226,6 +260,14 @@ and both signatures are checked against a key this build trusts: the `pubkey` in
   the version, the notes and the installer's URL were whatever the endpoint
   happened to serve: TLS proves those bytes came from GitHub, not that GitHub's
   bytes are the ones this project put there.
+- **The manifest names its assets by file name.** `tauri-action` writes each
+  platform's `url` as the release API's `.../releases/assets/<id>`, which serves
+  the asset only to a request that asks for `application/octet-stream`; every
+  other tool gets its JSON metadata, and `<id>.sig` names that same asset again
+  rather than the signature published beside it. The release job rewrites those
+  URLs to the release page's `.../releases/download/<tag>/<name>` before signing
+  ([manifest_urls.py](scripts/manifest_urls.py)), so the installer an update
+  downloads is the file the release page lists under its own name.
 - **The installer is signed.** Its `signature` — a
   [minisign](https://jedisct1.github.io/minisign/) signature over the installer
   — is checked while it is downloaded and **before it is allowed to run**,
@@ -307,6 +349,14 @@ cargo tauri signer generate -w ~/.tauri/ExcelScry.key
   installer jobs read. It was generated with an empty password, so no
   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` is needed; set both if that ever changes.
 
+The release and installer jobs both hold that secret to the committed pubkey
+before they build ([verify_signing_key.py](scripts/verify_signing_key.py)), so a
+secret that was never set, or that holds another key's material, stops either
+run in about a second — rather than after a full compile, as an exit 1 from
+`tauri build` that says nothing about a secret, or after publishing, as an
+update no installed copy will take. The installer job runs the same script as
+the release job rather than a check of its own, so the two cannot drift apart.
+
 Rotate by generating a new keypair, putting its **public** half in
 [`src-tauri/updater-keys.json`](src-tauri/updater-keys.json), and letting a
 release publish that roll — `scripts/manifest_keys.py` writes it into
@@ -362,10 +412,13 @@ src-tauri/
   main.rs               Tauri commands, window setup, single-instance handling
   model.rs              cell model and per-type display formatting
   number_format.rs      rendering a cell through its format code (via ssfmt)
-  cell_styles.rs        reading per-cell formats out of xlsx and ods packages
+  cell_styles.rs        reading per-cell formats, bold/italic and colours out of
+                        xlsx and ods packages
   workbook.rs           reading via calamine, absolute-coordinate normalisation
   text_table.rs         reading .csv/.tsv records into the same cell model
   ods_export.rs         writing ODS via spreadsheet-ods
+  ods_formats.rs        translating format codes into ODF number styles
+  sheet_layout.rs       reading column widths, row heights, merges and freezes
   trust.rs              package inspection: macros, links, connections, objects
   update.rs             update check and install, on tauri-plugin-updater
   manifest.rs           fetching the update manifest, checking its signature, and
@@ -387,8 +440,12 @@ scripts/
   verify_release.py     checks that a published release can update an installed copy,
                         and that its key roll is the one this repository publishes
   manifest_keys.py      writes that key roll into the manifest before it is signed
-  verify_workflow.py    checks that no release can be published before its manifest
-                        is signed
+  manifest_urls.py      names the manifest's assets by file rather than by asset id
+  test_manifest_urls.py runs that rewrite against the manifests it has to refuse
+  verify_signing_key.py checks the signing key before a release or installer builds
+  test_signing_key.py   runs that check against keys it has to accept and refuse
+  verify_workflow.py    checks that both build jobs check the key first, and that
+                        no release can be published before its manifest is signed
   build.sh / build.ps1  build and collect artifacts
   capture-window.ps1    screenshot a running app window (verification aid)
 samples/                sample files covering the awkward cases: one with a
@@ -401,7 +458,7 @@ samples/                sample files covering the awkward cases: one with a
 ## Tests
 
 ```bash
-cd src-tauri && cargo test        # 122 unit tests
+cd src-tauri && cargo test        # 168 unit tests
 cd src-tauri && cargo clippy --all-targets
 ```
 
@@ -411,6 +468,25 @@ The tests cover the parts that are easy to get subtly wrong:
   numbers stay numeric, that a date keeps its calendar day, that 36 hours stays
   a 36-hour duration, and that a block that starts at row 5 / column C is still
   at row 5 / column C afterwards;
+- **number formats surviving the export**: every formatted cell of a sheet is
+  written, reopened through the app's own open path, and must display exactly
+  what it displayed before — `[$€-407] #,##0.00` as `€ 1,234.50`, `0.00%` as
+  `12.34%`, `dd/mm/yyyy` as `09/01/2026`, `[h]:mm:ss` as `36:00:00` — with the
+  file checked to carry real `number:currency-style`, `number:date-style`,
+  `number:percentage-style` and `style:map` elements rather than the numbers
+  restyled as text; a hand-written Calc-shaped package verifies that a mapped
+  negative section reads back as `#,##0.00;(#,##0.00)` and that a
+  non-overflowing time style reads as a duration;
+- **the sheet's own geometry**: an xlsx package written in memory with
+  `sheetFormatPr`, `<col min max width>`, `<row ht>`, `<mergeCell>` and a
+  frozen `<pane>` must yield 79 px default columns, 173 px for column A, a
+  40 px second row, a `B2:D3` merge and two frozen rows plus one frozen column;
+  a split-window pane must not be mistaken for a freeze; an ODF `content.xml`
+  with column and row style properties and `table:number-columns-spanned` must
+  yield `3cm` → 113 px, `0.8cm` → 30 px and the same two-by-two region, while
+  an ODF `settings.xml` adds one frozen column and two frozen rows from its
+  split settings; the real sample workbook's widths must reach `WorkbookInfo`;
+  and a merge must grow the sheet's row and column extent to its far corner;
 - **viewing an `.ods` that this app did not write**: the fixture from
   `scripts/make_ods_sample.py` is plain ODF XML, and the test asserts the whole
   way through — the table keeps its C6 offset, a blank row inside the range
@@ -446,17 +522,38 @@ The tests cover the parts that are easy to get subtly wrong:
   table (custom and built-in `numFmt` ids, a 1904 calendar, a cell with no `r`
   attribute) and the ODF translation of `number:currency-style`,
   `number:percentage-style`, `number:date-style` and `number:time-style`,
-  including column defaults and repeated rows; the renderer is tested against
-  bracket currencies, negative sections, `[h]:mm:ss` spans, text sections,
+  including column defaults and repeated rows, a three-section code's red
+  negative and dash-for-zero written as `style:map` conditions on coloured
+  number styles, and their return through the app's own reader; the renderer is
+  tested against bracket currencies, negative sections, `[h]:mm:ss` spans, text sections,
   ungrammatical codes and integers past 2^53, where formatting would print
   digits the file does not contain and the exact value wins;
+- **bold, italic, colours and widths surviving the export**: a styled sheet
+  is exported, its `content.xml` checked for `fo:font-weight`, `fo:font-style`,
+  `fo:color`, `fo:background-color` and `style:column-width`, then reopened
+  through the app's own path with the look and width compared to the original;
+  a sheet with a merged title, a merged total, tall rows and a wide empty
+  column is exported and reopened with every width, height and merge intact;
+  a hand-written xlsx verifies theme colours (including tint), the indexed
+  palette, fills and a parent ODF cell style, and the real sample's bold blue
+  total row is exported and read back unchanged;
 - **delimited text**, read into the same model: a quoted field holding the
   delimiter, a doubled quote, a record spanning two lines, `CRLF` and a
   trailing newline, ragged rows, a `;`-separated file detected from its first
-  record, a UTF-8 BOM, UTF-16 with a BOM, undecodable bytes shown rather than
-  dropped, and a cell budget that stops a file too large to hold; the sample
-  `.csv` and `.tsv` open through `workbook::load` with their record boundaries
-  intact;
+  record, a UTF-8 BOM, UTF-16 with a BOM, UTF-16 without one recognised from
+  its zero high bytes in either byte order, zero bytes that decode to control
+  characters rejected as text, Windows-1252 chosen for bytes that are not
+  UTF-8 — including a single such byte past the inspected window, which is
+  re-read whole rather than shown as `�` — a UTF-8 character cut in half by
+  that window still read as UTF-8, an explicit UTF-8 read of a legacy file
+  reported as undecodable, and a cell budget that stops a file too large to
+  hold; a chosen delimiter replacing detection, a chosen encoding respected,
+  and the dialect a text file reports so the UI knows what to offer; the sample
+  `.csv` and `.tsv` open through `workbook::load_with` with their record
+  boundaries intact; and the per-file memory of those choices — keyed by a
+  canonical path so another spelling of the same file finds it, filled in on a
+  first open but not on an explicit Auto, replaced by the latest choice, and
+  ignored rather than breaking an open when its store is damaged;
 - display formatting for large integers (no `f64` round trip), fractional
   numbers, times and durations;
 - the package inspector, driven from zips built in memory: each signal is found
@@ -485,7 +582,15 @@ the same table with its own style definitions.
 `python scripts/make_csv_sample.py` writes the same table as
 `samples/ExcelScry-sample.csv` and `.tsv` — CRLF, quoted fields and all — and
 [docs/csv-verification.html](docs/csv-verification.html) shows the comma file
-opening.
+opening. [docs/text-dialect.html](docs/text-dialect.html) shows the bar that
+re-reads one with another delimiter or encoding, and that same bar naming a
+Windows-1252 read nobody chose, and
+[docs/frozen-header.html](docs/frozen-header.html) shows a text table's first
+record pinned above the scrolling rows, and
+[docs/header-row.html](docs/header-row.html) shows a run whose column names are
+its third record, pinned by number rather than assumed.
+[docs/sheet-geometry.html](docs/sheet-geometry.html) shows a sheet laid out by
+its own column widths, row heights and merged regions.
 
 ### UI harness
 
@@ -496,7 +601,16 @@ of the Tauri bridge that reproduces the IPC contract exactly (including
 `get_rows` returning the same clamped camelCase page shape as the Rust side).
 Open that file in a browser to exercise the grid, tabs, virtual scrolling,
 dialogs and escaping without a build. It is a development tool and is not
-shipped.
+shipped. Its *Wide sheet* freezes its first row and first column, so the
+frozen panes can be scrolled and clicked without a workbook. Its mock has an
+Excel workbook and, at `ui-harness.html#csv`, a
+200-row delimited file with twelve columns — enough rows and columns to scroll
+both ways, so the pinned first row and the text bar can be seen working. At
+`ui-harness.html#preamble` a shorter export carries a title and a note above its
+column names, so a header other than the first record can be chosen and the
+strip followed as it pins. One mock sheet, *Sized & merged*, carries column
+widths, row heights and four merged regions, so the geometry, hit-testing and
+arrow-key behaviour can be exercised without a build.
 
 ## Continuous integration
 
@@ -515,6 +629,8 @@ cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
 python scripts/bump_version.py --check
 python scripts/manifest_keys.py --check
+python scripts/test_manifest_urls.py
+python scripts/test_signing_key.py
 python scripts/verify_workflow.py
 python scripts/test_release.py
 ```
@@ -528,12 +644,19 @@ installer.
 
 The same job also reads the release path itself. `python
 scripts/manifest_keys.py --check` holds the key roll to the rules an installed
-copy applies to it, and
-[`scripts/verify_workflow.py`](scripts/verify_workflow.py) reads the release job's
-steps and refuses a workflow that could make a release visible before its
+copy applies to it, [`scripts/test_manifest_urls.py`](scripts/test_manifest_urls.py)
+holds the manifest rewrite to the names a release actually publishes — an asset
+id the release does not list, an asset from another repository, and a URL that
+is neither form are each refused there rather than on a tag — and
+[`scripts/verify_workflow.py`](scripts/verify_workflow.py) reads both build
+jobs' steps and refuses a workflow that could make a release visible before its
 manifest was signed — a draft instead of a published release, a signing step
 moved after the publishing one, a publishing step that no longer checks what it
 is about to reveal, or another job asking the action for a release of its own.
+It also refuses either job whose signing-key preflight moved after the build, is
+missing, or has been replaced by a check of its own, which is the difference
+between finding a missing or wrong key in a second and finding it out from a
+compile.
 That check exists because nothing else can make it: the `verify-release` job runs
 once the release is public and passes either way, so a step moved in a pull
 request would be invisible until a copy asked the endpoint at exactly the wrong
@@ -601,9 +724,12 @@ Two things that are deliberately absent:
   `makensis` is not required.
 
 **`release`** runs only for a `v*` tag and is the one job that writes to the
-repository. It checks that the tag names the version in the manifest, builds the
-portable executable and the installer, and has `tauri-action` create the GitHub
-Release as a **draft**, with both attached — body from `scripts/release_notes.py`,
+repository. Its first step checks that the updater signing key is present and is
+the one `tauri.conf.json` trusts — a check that takes a moment, against a build
+that would otherwise spend minutes compiling before failing with an exit 1 that
+names no secret. It then checks that the tag names the version in the manifest,
+builds the portable executable and the installer, and has `tauri-action` create
+the GitHub Release as a **draft**, with both attached — body from `scripts/release_notes.py`,
 with GitHub's own generated notes appended. Alongside them it uploads the two
 files the updater reads, `latest.json` and the installer's `.sig`, both built
 from the same signed build. The `installer` job skips tag pushes, so a tag is
@@ -614,7 +740,10 @@ signing step safe to run after the build rather than inside it. Two steps follow
 because `tauri-action` cannot sign the manifest it writes:
 
 - the first downloads `latest.json` from the draft, writes the repository's key
-  roll into it, signs it with the version `bump_version.py --print` reports, and
+  roll into it, renames each platform's asset URL to the file name the release
+  publishes it under — the release API's asset ids are looked up in the draft
+  itself, so the URL written is the one GitHub already serves that asset at —
+  signs it with the version `bump_version.py --print` reports, and
   uploads `latest.json.sig` beside it. That is the signature an installed copy
   checks before it believes a word of the manifest ([Updates](#updates)), so this
   failing means the release cannot update anybody — and since the release is
@@ -637,7 +766,9 @@ the files and being updateable from them are different questions.
 [`scripts/verify_release.py`](scripts/verify_release.py) fetches `latest.json`
 and the signature published beside it from the endpoint the app uses, checks
 that it announces the version being verified, verifies that signature over the
-manifest's own bytes, and then downloads the installer the manifest points at
+manifest's own bytes, checks that every platform names its asset by file name
+under this tag rather than by asset id ([manifest_urls.py](scripts/manifest_urls.py)),
+and then downloads the installer the manifest points at
 and verifies its signature too — for each of them the key id, the signature, the
 global signature over the trusted comment and the version that comment records,
 which are the checks the app itself makes. Every asset the workflow publishes is
@@ -745,18 +876,36 @@ starts all of it.
 
 ## Limitations
 
-- **Only the number format is taken from a cell's style.** Colours, fonts,
-  borders, column widths and merged cells are not exposed by calamine and are
-  not rendered, so the grid keeps one uniform look. Number formats are read for
-  `.xlsx`, `.xlsm` and `.ods`; a legacy `.xls` or `.xlsb` keeps binary style
-  tables the reader does not surface, so those files fall back to the default
-  date/number rendering. Values themselves are shown exactly either way.
+- **A sheet's number formats, column widths, row heights, merged cells and
+  frozen panes are shown; its colours, fonts and borders are not.** Those live in the same style
+  tables calamine does not surface; the colour and font attributes are read
+  only so an export can carry them, while the grid itself keeps one uniform
+  look. Formats, sizes, merges, frozen panes, bold/italic and colours are read
+  for `.xlsx`, `.xlsm` and `.ods`; a legacy `.xls` or `.xlsb` keeps them in
+  binary records the reader does not expose, so those files fall back to
+  uniform 112 × 24 cells, plain number rendering and no exported styling.
+  Hidden columns and rows are shown at the size they carry rather than hidden,
+  and a freeze beyond the sheet's used rows or columns is not extended into
+  empty space. A sheet whose pixel height passes the browser's canvas limit is
+  scaled down as a whole so that it stays scrollable. Values themselves are
+  shown exactly either way.
 - **A delimited file has no types.** Every `.csv`/`.tsv` value is text, so the
   grid left-aligns it and an export writes strings: `000123` stays an
-  identifier, but `19.99` does not become a number. Encodings other than UTF-8
-  and UTF-16 with a BOM are shown with replacement characters rather than
-  guessed at, and the shell integration registers the spreadsheet formats, not
+  identifier, but `19.99` does not become a number. Encodings are recognised
+  among UTF-8, UTF-16 (with or without a byte order mark) and Windows-1252; a
+  file in another legacy encoding — Shift-JIS, KOI8-R, GBK — is read as
+  Windows-1252 and shows the wrong accented characters until another is chosen
+  from the bar. UTF-16 in a script that needs both bytes for every character
+  (Greek, Cyrillic, CJK) is only recognised when it carries a BOM. A chosen
+  delimiter and encoding are remembered by path, not by what the file holds, so
+  a different file put at the same path keeps the old choices until the bar is
+  changed. The shell integration registers the spreadsheet formats, not
   `.csv`/`.tsv`.
+- **Only a delimited file's header can be pinned, and only for as long as it is
+  open.** A workbook's rows pin nothing: any of them could be a heading, so
+  none is treated as one. The chosen header row is view state, not saved with
+  the file or remembered for the next time it is opened — a new open starts
+  from the first record.
 - **Formulas are shown as their last cached value**, not as formulas.
 - **Macros are never run.** A `.xlsm` opens as data; its VBA project is not
   executed, extracted or written anywhere. ExcelScry only ever reads.
@@ -765,6 +914,24 @@ starts all of it.
 - A workbook whose sheets cannot be parsed fails with an explanatory message
   rather than a partial view.
 - Password-protected workbooks are not supported; the error says so.
+- **An export carries number formats, bold/italic, colours and column widths,
+  but only what ODF can say.** Money, dates, times, durations and percentages
+  keep the display they had, including a second section for negatives and a
+  third for zero — through ODF `style:map` conditions, so `($1,234.50)` stays
+  parenthesised and a zero section of `"-"` stays a dash. A section's `[Red]`
+  (or another named or indexed colour) becomes the text colour of that section's
+  number style, and is read back as the same section colour. An empty zero
+  section (hide zeros) is still not represented, and the alignment padding `_x`
+  and `*x` reserve are dropped. Fractions, scientific notation, sub-second precision,
+  single-letter months (`mmmmm`) and the Buddhist calendar are written as plain
+  values rather than approximated. Cell text and fill colours are exported,
+  with theme and indexed colours resolved to RGB and only the solid foreground
+  of a patterned fill kept; font names, sizes, underlines and borders are not
+  exported. Widths and heights come from the sheet's own columns and rows, so a
+  column or row the source left at its default is written at that default;
+  merged regions are written as spanning cells with their covered cells marked.
+  Overlapping merges are written as the file describes them rather than being
+  repaired.
 - Exports are value-only; the ODS file contains no formulas.
 - **Updates only exist from the first release built by the workflow**, and only
   for a strictly newer version. Installed copies of an older, pre-updater

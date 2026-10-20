@@ -60,6 +60,51 @@
         </button>
       </header>
 
+      <!-- Shown only for a delimited text file, where the two guesses a reader
+           has to make - the delimiter and the encoding - are visible and can be
+           corrected without reopening the file, and where the record to pin as
+           the header is the user's to name. -->
+      <div class="textbar" id="textbar" hidden>
+        <span class="textbar-title">Delimited text</span>
+        <label class="textbar-field">
+          <span>Delimiter</span>
+          <select id="text-delimiter">
+            <option value="">Auto</option>
+            <option value="comma">Comma</option>
+            <option value="semicolon">Semicolon</option>
+            <option value="tab">Tab</option>
+            <option value="pipe">Pipe</option>
+          </select>
+        </label>
+        <label class="textbar-field">
+          <span>Encoding</span>
+          <select id="text-encoding">
+            <option value="">Auto</option>
+            <option value="utf-8">UTF-8</option>
+            <option value="windows-1252">Windows-1252</option>
+            <option value="utf-16le">UTF-16 LE</option>
+            <option value="utf-16be">UTF-16 BE</option>
+          </select>
+        </label>
+        <label
+          class="textbar-field"
+          title="The row held above the grid while the rest scrolls. Leave it empty to pin nothing."
+        >
+          <span>Header row</span>
+          <input
+            id="text-header"
+            type="number"
+            min="1"
+            step="1"
+            inputmode="numeric"
+            placeholder="None"
+            aria-label="Row pinned as the header"
+          />
+        </label>
+        <span class="textbar-detected" id="text-detected"></span>
+        <span class="textbar-hint" id="text-hint" hidden></span>
+      </div>
+
       <main class="stage" id="stage">
         <!-- Shown before anything is loaded -->
         <section class="welcome" id="welcome">
@@ -106,6 +151,28 @@
             </div>
             <div class="rows-viewport" id="rows-viewport">
               <div class="rows" id="rows"></div>
+            </div>
+            <!-- The header row of a delimited file, pinned while the rest
+                 scrolls. Which record that is, the bar lets the user say; it
+                 starts as the first one. -->
+            <div class="frozen-corner" id="frozen-corner" hidden>1</div>
+            <div class="frozen-viewport" id="frozen-viewport" hidden>
+              <div class="frozen" id="frozen"></div>
+            </div>
+            <!-- Rows and columns the workbook freezes. The four panes are
+                 drawn over the body: the corner where they meet, the frozen
+                 rows scrolling sideways, and the frozen columns scrolling
+                 down. -->
+            <div class="freeze-cols-head" id="freeze-cols-head" hidden></div>
+            <div class="freeze-rows-head" id="freeze-rows-head" hidden></div>
+            <div class="freeze-pane freeze-corner" id="freeze-corner-pane" hidden>
+              <div class="freeze-inner" id="freeze-corner-cells"></div>
+            </div>
+            <div class="freeze-pane freeze-top" id="freeze-top" hidden>
+              <div class="freeze-inner" id="freeze-top-cells"></div>
+            </div>
+            <div class="freeze-pane freeze-left" id="freeze-left" hidden>
+              <div class="freeze-inner" id="freeze-left-cells"></div>
             </div>
             <div class="body" id="body">
               <div class="cells" id="cells"></div>

@@ -18,6 +18,12 @@ use crate::model::Cell;
 /// A format code parsed once and shared by every cell that uses it.
 #[derive(Debug)]
 pub struct NumberFormat {
+    /// The code as the workbook wrote it (`#,##0.00`, `dd/mm/yyyy`...).
+    ///
+    /// Kept because a writer needs the code itself, not just its parse: the
+    /// export reproduces the cell's display from this rather than guessing at
+    /// it from the value.
+    code: String,
     parsed: Parsed,
     system: DateSystem,
     options: FormatOptions,
@@ -36,6 +42,7 @@ impl NumberFormat {
         }
         let parsed = Parsed::parse(trimmed).ok()?;
         Some(Arc::new(Self {
+            code: trimmed.to_string(),
             parsed,
             system,
             options: FormatOptions {
@@ -43,6 +50,17 @@ impl NumberFormat {
                 ..FormatOptions::default()
             },
         }))
+    }
+
+    /// The format code this was parsed from, trimmed.
+    pub fn code(&self) -> &str {
+        &self.code
+    }
+
+    /// The sections of the code, in Excel's order: positive, negative, zero,
+    /// text. A writer needs them to rebuild the same display elsewhere.
+    pub fn sections(&self) -> &[ssfmt::ast::Section] {
+        self.parsed.sections()
     }
 
     /// Text under a text section.

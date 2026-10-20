@@ -13,7 +13,8 @@ use calamine::{open_workbook_auto, Data, Error as CalamineError, Reader};
 use chrono::{Duration, NaiveTime};
 
 use crate::cell_styles;
-use crate::model::{Cell, LoadedWorkbook, SheetData};
+use crate::model::{Cell, LoadedWorkbook, SheetData, SheetLayout};
+use crate::sheet_layout;
 use crate::text_table;
 use crate::trust::{self, TrustReport};
 
@@ -26,8 +27,13 @@ pub const MAX_CELLS: usize = 2_000_000;
 const MAX_ROWS: usize = 1_048_576;
 const MAX_COLS: usize = 16_384;
 
-/// Load a workbook from disk.
-pub fn load(path: &Path) -> Result<LoadedWorkbook, String> {
+/// Load a workbook from disk, with a delimited file read the way the caller
+/// chose.
+///
+/// `dialect` only matters for `.csv`/`.tsv`; every other format carries its own
+/// types and needs nothing decided. A caller with nothing to say passes
+/// `Dialect::default()`, which is what an open from the command line does.
+pub fn load_with(path: &Path, dialect: text_table::Dialect) -> Result<LoadedWorkbook, String> {
     let meta =
         fs::metadata(path).map_err(|e| format!("Cannot open \"{}\": {e}", path.display()))?;
     if meta.is_dir() {
@@ -40,7 +46,7 @@ pub fn load(path: &Path) -> Result<LoadedWorkbook, String> {
     // A delimited file is not a zip, an OLE2 file or anything else calamine
     // reads; it is text, and it becomes the same cell model a sheet would.
     if let Some(kind) = text_table::kind_of(path) {
-        return text_table::load(path, &meta, kind);
+        return text_table::load_with(path, &meta, kind, dialect);
     }
 
     let mut book = open_workbook_auto(path).map_err(|e| describe(path, &e))?;
@@ -49,7 +55,14 @@ pub fn load(path: &Path) -> Result<LoadedWorkbook, String> {
     let trust = TrustReport::new(trust::inspect(path, &mut book));
     // The style tables live outside what the reader exposes, so they are read
     // separately; a package without them simply renders as it always has.
-    let mut formats = cell_styles::read(path).sheets;
+    let cell_styles::WorkbookFormats {
+        sheets: mut formats,
+        mut looks,
+        ..
+    } = cell_styles::read(path);
+    // Column widths, row heights and merges live in the worksheet parts too,
+    // and in a shape the reader does not expose.
+    let mut layouts = sheet_layout::read(path).sheets;
     let names = book.sheet_names();
 
     let mut sheets = Vec::with_capacity(names.len());
@@ -115,7 +128,7 @@ pub fn load(path: &Path) -> Result<LoadedWorkbook, String> {
         }
 
         // Trim trailing empty columns so `cols` reflects real content.
-        let cols = rows
+        let mut cols = rows
             .iter()
             .map(|r| {
                 r.iter()
@@ -127,11 +140,16 @@ pub fn load(path: &Path) -> Result<LoadedWorkbook, String> {
             .unwrap_or(0)
             .max(widest.min(total_cols));
 
+        let layout = layouts.remove(name).unwrap_or_default();
+        cols = cover_merges(&mut rows, cols, &layout);
+
         sheets.push(SheetData {
             name: name.clone(),
             rows,
             cols,
             formats: formats.remove(name).unwrap_or_default(),
+            looks: looks.remove(name).unwrap_or_default(),
+            layout,
         });
 
         if sheet_truncated {
@@ -142,6 +160,8 @@ pub fn load(path: &Path) -> Result<LoadedWorkbook, String> {
                     rows: Vec::new(),
                     cols: 0,
                     formats: Default::default(),
+                    looks: Default::default(),
+                    layout: Default::default(),
                 });
             }
             break;
@@ -174,6 +194,7 @@ pub fn load(path: &Path) -> Result<LoadedWorkbook, String> {
         total_cells: MAX_CELLS - budget,
         used_cells,
         trust,
+        text: None,
     })
 }
 
@@ -380,9 +401,37 @@ pub(crate) fn format_label(path: &Path) -> String {
     .to_string()
 }
 
+/// Grow a sheet's extent to include every merged region's far corner.
+///
+/// A merge is part of the sheet even when only its anchor holds a value, and
+/// the grid cannot draw a region that falls outside the rows it was told about.
+/// Returns the column count the sheet needs.
+fn cover_merges(rows: &mut Vec<Vec<Cell>>, cols: usize, layout: &SheetLayout) -> usize {
+    let mut cols = cols;
+    for merge in &layout.merges {
+        cols = cols.max((merge.col + merge.cols).min(MAX_COLS));
+    }
+    let merged_rows = layout
+        .merges
+        .iter()
+        .map(|m| m.row + m.rows)
+        .max()
+        .unwrap_or(0)
+        .min(MAX_ROWS);
+    if merged_rows > rows.len() {
+        rows.resize(merged_rows, Vec::new());
+    }
+    cols
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The default read, which is what an open from the command line does.
+    fn load(path: &Path) -> Result<LoadedWorkbook, String> {
+        load_with(path, text_table::Dialect::default())
+    }
 
     #[test]
     fn missing_file_is_reported_clearly() {
@@ -580,6 +629,56 @@ mod tests {
         assert_eq!(shown(&wb, 0, 6, 10), "35.0%", "margin is a percentage");
         // The values themselves are untouched, so an export still writes numbers.
         assert_eq!(wb.sheets[0].cell(6, 6), &Cell::Float(23988.0));
+    }
+
+    #[test]
+    fn a_workbook_reports_the_sheet_geometry_it_has() {
+        let wb = load(&sample("ExcelScry-sample.xlsx")).expect("an xlsx should open");
+        let info = wb.info();
+        let sheet = &info.sheets[0];
+
+        // The generator sizes the table's columns and leaves A and B alone.
+        assert_eq!(sheet.default_row_height, Some(20.0));
+        assert!(sheet.default_col_width.is_some());
+        assert!(
+            sheet.col_widths.contains(&(2, 75.0)),
+            "column C should carry its own width: {:?}",
+            sheet.col_widths
+        );
+        assert_eq!(wb.sheets[0].layout.col_widths.get(&2), Some(&75.0));
+        assert!(
+            sheet.row_heights.is_empty(),
+            "the sample sets no row heights"
+        );
+        assert!(sheet.merges.is_empty());
+
+        // The sample's total row is bold on a pale blue fill; both live in
+        // `styles.xml` and are read beside the widths.
+        let look = wb.sheets[0]
+            .looks
+            .get(5, 2)
+            .expect("C6 should carry the total row's look");
+        assert!(look.bold, "C6 is bold in the sample");
+        assert_eq!(look.background.as_deref(), Some("#DCE6F1"));
+    }
+
+    #[test]
+    fn merged_regions_extend_the_sheet() {
+        use crate::model::MergeInfo;
+
+        let mut rows = vec![Vec::new(); 1];
+        let mut layout = SheetLayout::default();
+        layout.merges.push(MergeInfo {
+            row: 2,
+            col: 4,
+            rows: 3,
+            cols: 2,
+        });
+
+        let cols = cover_merges(&mut rows, 1, &layout);
+        assert_eq!(cols, 6, "the grid has to reach the merge's far column");
+        assert_eq!(rows.len(), 5, "and its last row");
+        assert!(rows.iter().all(Vec::is_empty));
     }
 
     #[test]

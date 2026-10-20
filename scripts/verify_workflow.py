@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Check that this workflow cannot publish a release before its manifest is signed.
+"""Check that both build jobs check the signing key, and that no release is
+published before its manifest is signed.
 
 The app will not use a manifest nothing signed, so a release that became visible
 with an unsigned one would be refused by every copy that asked, until the
@@ -14,6 +15,9 @@ None of that is something a release can be tested for afterwards: the
 not the manifest was ever briefly unsigned. So the workflow itself is read here
 instead, and the ordering it has to have is asserted:
 
+* the signing key is checked before the build, rather than by it, in both the
+  release and the installer jobs, so a missing or wrong key costs a second
+  instead of a compile;
 * the release job's build creates a draft, not a published release;
 * the manifest is signed after that build and before anything is published;
 * the step that publishes runs the release check over the manifest and its
@@ -24,8 +28,8 @@ Run from the repository root, or let the checks job run it on every push:
 
     python scripts/verify_workflow.py
 
-Exit status 1 means the workflow would publish something a copy could read before
-its manifest was signed.
+Exit status 1 means the workflow would build without the key it needs, or publish
+something a copy could read before its manifest was signed.
 """
 
 from __future__ import annotations
@@ -45,6 +49,8 @@ WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 
 # What the steps are called, and what the step that publishes has to contain.
 BUILD = "Build the release, as a draft"
+KEY_CHECK = "Check that the updater signing key is the one this build trusts"
+KEY_SCRIPT = "verify_signing_key.py"
 SIGN = "Sign the update manifest"
 PUBLISH = "Publish the signed release"
 VISIBLE = "--draft=false"
@@ -69,7 +75,7 @@ def main() -> int:
     steps = jobs["release"]["steps"]
     names = [step_name(step) for step in steps]
 
-    for missing in (BUILD, SIGN, PUBLISH):
+    for missing in (KEY_CHECK, BUILD, SIGN, PUBLISH):
         if missing not in names:
             raise SystemExit(
                 f"error: the release job has no step named {missing!r}. If it was\n"
@@ -78,7 +84,20 @@ def main() -> int:
                 "       it if they cannot find the steps."
             )
 
-    build, sign, publish = (names.index(name) for name in (BUILD, SIGN, PUBLISH))
+    key, build, sign, publish = (
+        names.index(name) for name in (KEY_CHECK, BUILD, SIGN, PUBLISH)
+    )
+
+    # The key, before the thing that needs it. `tauri build` signs its updater
+    # artifact, so without the key it fails minutes in, as an exit 1 that names
+    # no secret; and a secret holding another key's material builds and signs
+    # perfectly, then cannot update anybody.
+    require(key < build, f"{KEY_CHECK!r} has to run before {BUILD!r}")
+    require(
+        KEY_SCRIPT in steps[key].get("run", ""),
+        f"the {KEY_CHECK!r} step has to run `{KEY_SCRIPT}`, which is what holds\n"
+        "       the secret to the pubkey this build trusts",
+    )
 
     # The draft, which is what keeps the release out of reach while the manifest
     # is unsigned.
@@ -115,6 +134,39 @@ def main() -> int:
         f"the {PUBLISH!r} step has to be what publishes the release ({VISIBLE})",
     )
 
+    # The installer job builds the same signed updater artifact as a release,
+    # with no signing steps of its own, so it gets the same preflight. Without
+    # it a keyless or wrong-key run compiles the whole app and only then fails,
+    # or builds an artifact every installed copy would refuse.
+    installer = jobs["installer"]["steps"]
+    installer_names = [step_name(step) for step in installer]
+    if KEY_CHECK not in installer_names:
+        raise SystemExit(
+            f"error: the installer job has no step named {KEY_CHECK!r}, so a\n"
+            "       keyless or wrong-key build would be found out by compiling.\n"
+            "       If the step was renamed, rename it here too."
+        )
+    installer_key = installer_names.index(KEY_CHECK)
+    installer_builds = [
+        index
+        for index, step in enumerate(installer)
+        if "tauri-apps/tauri-action" in str(step.get("uses", ""))
+    ]
+    require(
+        bool(installer_builds),
+        "the installer job has no tauri-action build step to check the key before",
+    )
+    if installer_builds:
+        require(
+            installer_key < installer_builds[0],
+            f"the installer job's {KEY_CHECK!r} has to run before it builds",
+        )
+    require(
+        KEY_SCRIPT in installer[installer_key].get("run", ""),
+        f"the installer job's {KEY_CHECK!r} step has to run `{KEY_SCRIPT}`, the\n"
+        "       same preflight the release job uses",
+    )
+
     # And nothing else can make a release visible: no step creates one, and no
     # other job asks the action for one.
     require("gh release create" not in text, "nothing in this workflow should create a release")
@@ -135,7 +187,8 @@ def main() -> int:
             )
 
     if problems:
-        print("error: this workflow can publish a release whose manifest is not signed yet.")
+        print("error: this workflow can publish a release before its manifest is signed,")
+        print("       or build one without the signing key it needs.")
         for problem in problems:
             print(f"  - {problem}")
         print()
@@ -143,8 +196,9 @@ def main() -> int:
         print("window is offered nothing; see 'Updates' in README.md.")
         return 1
 
-    print("The release job builds a draft, signs its manifest, checks the signature")
-    print("back out of the draft and publishes it last; nothing else can publish one.")
+    print("The release and installer jobs check the signing key before compiling;")
+    print("the release builds a draft, signs its manifest, checks the signature back")
+    print("out of the draft and publishes it last; nothing else can publish one.")
     for index, name in enumerate(names):
         marker = " <- publishes" if index == publish else ""
         print(f"  {index}: {name}{marker}")

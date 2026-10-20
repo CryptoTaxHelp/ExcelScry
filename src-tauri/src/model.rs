@@ -6,7 +6,7 @@
 
 use chrono::{Duration, NaiveDateTime, NaiveTime};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use crate::number_format::NumberFormat;
@@ -151,6 +151,96 @@ impl SheetFormats {
     }
 }
 
+/// How a cell looks beyond its value: its font weight and slant, and the two
+/// colours that make a coloured report recognisable.
+///
+/// Colours are `#RRGGBB`, upper-case, with any alpha dropped: ODF stores opaque
+/// colours and the grid has nothing to composite against. A cell with no entry
+/// in [`SheetLooks`] looks like plain text, so an unstyled sheet costs nothing.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct CellLook {
+    pub bold: bool,
+    pub italic: bool,
+    /// The text colour, when the file sets one.
+    pub color: Option<String>,
+    /// The cell's fill, when the file sets one.
+    pub background: Option<String>,
+}
+
+impl CellLook {
+    /// True when the cell would look the same as one with no style at all.
+    pub fn is_plain(&self) -> bool {
+        !self.bold && !self.italic && self.color.is_none() && self.background.is_none()
+    }
+}
+
+/// The appearance of the cells that carry one, keyed by absolute position.
+///
+/// Sparse for the same reason [`SheetFormats`] is: most sheets style a header
+/// row, some totals and a few coloured cells, not every cell they contain.
+#[derive(Debug, Clone, Default)]
+pub struct SheetLooks {
+    cells: HashMap<u64, Arc<CellLook>>,
+}
+
+impl SheetLooks {
+    pub fn insert(&mut self, row: usize, col: usize, look: Arc<CellLook>) {
+        self.cells.insert(cell_key(row, col), look);
+    }
+
+    pub fn get(&self, row: usize, col: usize) -> Option<&CellLook> {
+        self.cells.get(&cell_key(row, col)).map(|l| l.as_ref())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.cells.is_empty()
+    }
+
+    /// Every styled position, including ones with no value: a filled blank
+    /// cell is part of how a table looks.
+    pub fn iter(&self) -> impl Iterator<Item = (usize, usize, &CellLook)> {
+        self.cells.iter().map(|(key, look)| {
+            (
+                (key >> 32) as usize,
+                (key & u32::MAX as u64) as usize,
+                look.as_ref(),
+            )
+        })
+    }
+}
+
+/// A merged region, anchored at its top-left cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeInfo {
+    pub row: usize,
+    pub col: usize,
+    pub rows: usize,
+    pub cols: usize,
+}
+
+/// The worksheet's own geometry: how wide its columns and tall its rows are,
+/// which cells it merges, and which rows and columns it freezes on screen.
+///
+/// Sizes are in CSS pixels, converted from whatever unit the package used, and
+/// sparse: a sheet that leaves every column at the default stores nothing, and
+/// a sheet with three wider columns stores three entries. Merged regions are a
+/// plain list because the grid needs both the anchor and what it covers.
+#[derive(Debug, Clone, Default)]
+pub struct SheetLayout {
+    pub col_widths: BTreeMap<usize, f64>,
+    pub row_heights: BTreeMap<usize, f64>,
+    /// The workbook's default column width, when it differs from this app's.
+    pub default_col_width: Option<f64>,
+    /// The workbook's default row height, when it differs from this app's.
+    pub default_row_height: Option<f64>,
+    pub merges: Vec<MergeInfo>,
+    /// Columns pinned at the left, counted from column A. Zero means none.
+    pub frozen_cols: usize,
+    /// Rows pinned at the top, counted from row 1. Zero means none.
+    pub frozen_rows: usize,
+}
+
 /// One worksheet, stored as a dense row table addressed by *absolute* row
 /// index (row 0 is spreadsheet row 1) with each row trimmed to its last
 /// non-empty column.
@@ -162,6 +252,11 @@ pub struct SheetData {
     pub cols: usize,
     /// How each formatted cell should be displayed; `General` cells are absent.
     pub formats: SheetFormats,
+    /// Bold, italic and the colours of the cells that carry them.
+    pub looks: SheetLooks,
+    /// Column widths, row heights, merged regions and frozen panes, as the
+    /// file has them.
+    pub layout: SheetLayout,
 }
 
 impl SheetData {
@@ -184,6 +279,27 @@ impl SheetData {
     }
 }
 
+/// How a delimited text file was read.
+///
+/// A `.csv` has nothing but bytes and the convention of a delimiter, so what it
+/// was read with is worth reporting: the file may not be what its extension
+/// says, and a reader that guessed wrong has to be able to say so.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextInfo {
+    /// The delimiter the file was read with: `comma`, `semicolon`, `tab` or
+    /// `pipe`.
+    pub delimiter: String,
+    /// The encoding it was decoded with, as a name: `UTF-8`, `Windows-1252`...
+    pub encoding: String,
+    /// Whether the delimiter was chosen rather than detected from the file.
+    pub delimiter_chosen: bool,
+    pub encoding_chosen: bool,
+    /// True when bytes did not decode and replacement characters stand in for
+    /// them, which is what a wrong encoding looks like in the grid.
+    pub undecodable: bool,
+}
+
 /// A parsed workbook held in application state.
 #[derive(Debug, Clone)]
 pub struct LoadedWorkbook {
@@ -200,6 +316,8 @@ pub struct LoadedWorkbook {
     pub used_cells: usize,
     /// Macros, links and other active content found in the package.
     pub trust: TrustReport,
+    /// Set for `.csv`/`.tsv`, absent for every other format.
+    pub text: Option<TextInfo>,
 }
 
 /// One cell as sent over IPC: `[kind, display]`. `None` means empty.
@@ -231,6 +349,17 @@ pub struct SheetInfo {
     /// Absolute row index of the first non-empty row, so the UI can offer
     /// "jump to data" on sheets that start far from A1.
     pub first_used_row: Option<usize>,
+    /// `[column, width in pixels]` for the columns the sheet sizes itself.
+    pub col_widths: Vec<(usize, f64)>,
+    /// `[row, height in pixels]` for the rows the sheet sizes itself.
+    pub row_heights: Vec<(usize, f64)>,
+    pub default_col_width: Option<f64>,
+    pub default_row_height: Option<f64>,
+    pub merges: Vec<MergeInfo>,
+    /// Columns the sheet freezes at the left, zero when it freezes none.
+    pub frozen_cols: usize,
+    /// Rows the sheet freezes at the top, zero when it freezes none.
+    pub frozen_rows: usize,
 }
 
 /// The workbook description returned when a file is opened.
@@ -246,6 +375,9 @@ pub struct WorkbookInfo {
     pub total_cells: usize,
     pub used_cells: usize,
     pub trust: TrustReport,
+    /// Set for `.csv`/`.tsv`, absent for every other format. The UI offers a
+    /// delimiter and encoding picker when it is there.
+    pub text: Option<TextInfo>,
 }
 
 impl LoadedWorkbook {
@@ -268,12 +400,30 @@ impl LoadedWorkbook {
                         .map(|r| r.iter().filter(|c| !c.is_empty()).count())
                         .sum(),
                     first_used_row: s.first_used_row(),
+                    col_widths: s
+                        .layout
+                        .col_widths
+                        .iter()
+                        .map(|(&col, &width)| (col, width))
+                        .collect(),
+                    row_heights: s
+                        .layout
+                        .row_heights
+                        .iter()
+                        .map(|(&row, &height)| (row, height))
+                        .collect(),
+                    default_col_width: s.layout.default_col_width,
+                    default_row_height: s.layout.default_row_height,
+                    merges: s.layout.merges.clone(),
+                    frozen_cols: s.layout.frozen_cols,
+                    frozen_rows: s.layout.frozen_rows,
                 })
                 .collect(),
             truncated: self.truncated,
             total_cells: self.total_cells,
             used_cells: self.used_cells,
             trust: self.trust.clone(),
+            text: self.text.clone(),
         }
     }
 
@@ -388,6 +538,59 @@ mod tests {
     fn booleans_use_spreadsheet_case() {
         assert_eq!(Cell::Bool(true).display(), "TRUE");
         assert_eq!(Cell::Bool(false).display(), "FALSE");
+    }
+
+    #[test]
+    fn sheet_info_carries_geometry_in_the_front_end_shape() {
+        use crate::trust::{Trust, TrustReport};
+
+        let mut layout = SheetLayout::default();
+        layout.col_widths.insert(2, 75.0);
+        layout.row_heights.insert(3, 40.0);
+        layout.default_col_width = Some(64.0);
+        layout.default_row_height = Some(20.0);
+        layout.merges.push(MergeInfo {
+            row: 0,
+            col: 0,
+            rows: 2,
+            cols: 3,
+        });
+        layout.frozen_cols = 1;
+        layout.frozen_rows = 2;
+
+        let wb = LoadedWorkbook {
+            path: "memory.xlsx".into(),
+            file_name: "memory.xlsx".into(),
+            format: "Excel Workbook (xlsx)".into(),
+            file_size: 0,
+            sheets: vec![SheetData {
+                name: "Sized".into(),
+                rows: vec![vec![Cell::Text("a".into())]],
+                cols: 1,
+                formats: SheetFormats::default(),
+                looks: SheetLooks::default(),
+                layout,
+            }],
+            truncated: false,
+            total_cells: 1,
+            used_cells: 1,
+            trust: TrustReport::new(Trust::unknown()),
+            text: None,
+        };
+
+        // The front end reads these by name: `[[index, pixels], ...]` for the
+        // sparse sizes and camelCase merge fields.
+        let info = serde_json::to_value(wb.info()).unwrap();
+        let sheet = &info["sheets"][0];
+        assert_eq!(sheet["colWidths"], serde_json::json!([[2, 75.0]]));
+        assert_eq!(sheet["rowHeights"], serde_json::json!([[3, 40.0]]));
+        assert_eq!(sheet["defaultColWidth"], serde_json::json!(64.0));
+        assert_eq!(sheet["defaultRowHeight"], serde_json::json!(20.0));
+        assert_eq!(sheet["merges"][0]["row"], serde_json::json!(0));
+        assert_eq!(sheet["merges"][0]["rows"], serde_json::json!(2));
+        assert_eq!(sheet["merges"][0]["cols"], serde_json::json!(3));
+        assert_eq!(sheet["frozenCols"], serde_json::json!(1));
+        assert_eq!(sheet["frozenRows"], serde_json::json!(2));
     }
 
     #[test]

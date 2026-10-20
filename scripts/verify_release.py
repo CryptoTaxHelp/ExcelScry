@@ -685,6 +685,11 @@ def release_page_url(location: str) -> str:
     and it has no `<id>.sig` beside it: the suffix names the same asset again.
     The release page serves the same bytes under the asset's own file name,
     which is something a file published next to it can be named from.
+
+    Releases cut after 0.3.2 are published with their assets named that way
+    already - `scripts/manifest_urls.py` rewrites the manifest before it is
+    signed - so this returns those URLs unchanged. It is still the lookup for
+    the releases before that, which is why verifying one works.
     """
     match = GITHUB_ASSET.match(location)
     if not match:

@@ -65,6 +65,20 @@ jobs:
       - name: Check that the updater key roll can be carried out
         run: python scripts/manifest_keys.py --check
 
+      # The manifest a release publishes names each asset by the file the release
+      # page serves it as, which is a rewrite of what `tauri-action` writes. It
+      # happens on a tag, after this job, so what the rewrite refuses - an asset
+      # id the release does not list, an asset from another repository - is
+      # checked here rather than on the release that would publish it.
+      - name: Check that the manifest names its assets by file name
+        run: python scripts/test_manifest_urls.py
+
+      # The release job reads the signing key before it builds, so a missing or
+      # wrong key costs a second rather than a compile. What that check accepts
+      # and refuses is what keeps it from being another way to lose a release.
+      - name: Check that the signing key preflight accepts and refuses the right keys
+        run: python scripts/test_signing_key.py
+
       # `release.py` cuts a release of *this* repository, so it can never be
       # exercised on this one. The test runs it in a throwaway repository
       # instead - the real `src-tauri/` and `scripts/` copied in, a changelog
@@ -130,6 +144,23 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Exactly the preflight the release job runs, and first for the same
+      # reason: nothing here is worth installing or compiling until the key is
+      # known to be one this build can sign with. A secret that is not set
+      # arrives at the bundler as an *empty* variable rather than an absent one,
+      # which its own "no private key" complaint does not cover, so the failure
+      # would come minutes later as an exit 1 that blames the password and never
+      # mentions a secret. A secret holding another key's material is worse: it
+      # builds and signs perfectly, and every installed copy refuses the result.
+      # `verify_signing_key.py` settles both against the pubkey committed in
+      # `tauri.conf.json`.
+      - name: Check that the updater signing key is the one this build trusts
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: python scripts/verify_signing_key.py
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -138,52 +169,6 @@ jobs:
         with:
           workspaces: src-tauri -> target
 
-      # The key the build signs with is a repository secret, and one that is not
-      # set arrives at the bundler as an *empty* variable rather than an absent
-      # one, because that is what GitHub resolves an unset secret to. The
-      # bundler's own "no private key" complaint is for the absent case, so an
-      # empty one gets past it and the build dies later instead, decoding the
-      # key:
-      #
-      #     incorrect updater private key password: Missing comment in secret key
-      #
-      # which blames the password, never mentions the key, and never says a
-      # secret is missing at all - the same decode `tauri signer sign` reports
-      # with the variable set to nothing. So the absence is reported here
-      # instead, before anything is built, with the one thing that resolves it.
-      # `scripts/build.sh` and `scripts/build.ps1` refuse a keyless build the
-      # same way, from the environment or `~/.tauri/ExcelScry.key`.
-      - name: Check that the updater signing key is set
-        shell: bash
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-        run: |
-          set -euo pipefail
-          key="${TAURI_SIGNING_PRIVATE_KEY:-}"
-          if [[ -n "${key//[[:space:]]/}" ]]; then
-              echo "TAURI_SIGNING_PRIVATE_KEY is set: this build can sign its updater artifact."
-              exit 0
-          fi
-          # The annotation is what the run's summary shows; the lines after it
-          # are what someone reading the failed step's log sees first.
-          echo "::error title=TAURI_SIGNING_PRIVATE_KEY is not set::This repository has no TAURI_SIGNING_PRIVATE_KEY secret, so the build cannot sign the updater artifact it is configured to produce. Add it under Settings -> Secrets and variables -> Actions."
-          echo
-          echo 'error: the updater signing key is missing, so this build would be unsigned.'
-          echo '       Nothing this job does can fix that; the secret has to be added first.'
-          echo
-          echo '  Settings -> Secrets and variables -> Actions -> New repository secret'
-          echo
-          echo '    Name   TAURI_SIGNING_PRIVATE_KEY'
-          echo '    Value  the contents of the private key file, or a path to it'
-          echo
-          echo '  That key is the one `cargo tauri signer generate -w ~/.tauri/ExcelScry.key`'
-          echo '  wrote, and its public half is the plugins.updater.pubkey committed in'
-          echo '  src-tauri/tauri.conf.json: the two have to be a pair, or the release is'
-          echo '  one no installed copy would accept. It was generated with an empty'
-          echo '  password, so TAURI_SIGNING_PRIVATE_KEY_PASSWORD stays unset unless the'
-          echo "  key has one. 'Updates' in README.md has the whole of it."
-          exit 1
-
       # No Node or npm setup is needed: the front end is plain HTML/CSS/JS that
       # `frontendDist` points straight at, and there is no beforeBuildCommand.
       #
@@ -191,8 +176,8 @@ jobs:
       # its own toolset (NSIS_URL in tauri-bundler's windows/nsis module).
       #
       # It does need the signing key, because `createUpdaterArtifacts` is on and
-      # every `tauri build` signs its updater artifact; the step above reports
-      # that key being missing, before the build rather than inside it.
+      # every `tauri build` signs its updater artifact; the step above settles
+      # that key before the build rather than inside it.
       - name: Build the app and the installer
         uses: tauri-apps/tauri-action@v1
         env:
@@ -224,6 +209,21 @@ jobs:
           # `release_notes.py` reads the commit history since the previous tag,
           # so the clone needs all of it — depth 0 fetches every branch and tag.
           fetch-depth: 0
+
+      # Before anything is installed or built. `createUpdaterArtifacts` is on, so
+      # every `tauri build` signs its updater artifact: without the key the build
+      # fails after compiling the whole app, as an exit 1 from `tauri build` that
+      # says nothing about a secret. A workflow cannot test a secret in a step's
+      # `if:`, so this is a step that reads the environment and fails on its
+      # first line. It also holds the key to the `pubkey` committed in
+      # `tauri.conf.json`, because a secret holding another key builds and signs
+      # perfectly and is then refused by every installed copy.
+      - name: Check that the updater signing key is the one this build trusts
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: python scripts/verify_signing_key.py
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -316,6 +316,16 @@ jobs:
           # covers. The roll is `src-tauri/updater-keys.json`, which the checks
           # job has already held to the rules the app applies to one.
           python scripts/manifest_keys.py updater-manifest/latest.json
+          # Then the assets are named the way the release page serves them.
+          # `tauri-action` writes each platform's url as the release API's
+          # `.../releases/assets/<id>`, which the updater can fetch and nothing
+          # else can, and which `<id>.sig` cannot name a signature from. The
+          # names come from the release itself, so the url written is the one
+          # GitHub already serves that asset at. This is before the signature
+          # like the key roll is: an installed copy verifies the bytes it
+          # downloads, so what it verifies has to be this manifest.
+          python scripts/manifest_urls.py updater-manifest/latest.json \
+            --repository "${{ github.repository }}" --tag "${{ github.ref_name }}"
           # The version comes from the manifest, never a literal: it is the
           # number the tag was checked against and the one `tauri build` stamps
           # into the installers' signatures, so the three agree by construction.
@@ -373,3 +383,17 @@ jobs:
 
       - name: Check every asset the published release carries
         run: python scripts/verify_release.py "${{ github.ref_name }}"
+
+      # The check above downloads what the manifest names, which the updater
+      # can do through the API urls `tauri-action` writes. This asks the other
+      # half of the question: that what a copy reaches names its assets the way
+      # the release page does, so a tool reading the manifest - a person with
+      # `curl`, a page, a script - gets the file rather than its metadata. It
+      # runs after the check above, which is what establishes that the endpoint
+      # is serving this release rather than the previous one.
+      - name: Check the manifest names its assets by file name
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/manifest_urls.py --check \
+            --repository "${{ github.repository }}" --tag "${{ github.ref_name }}"

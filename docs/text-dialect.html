@@ -1,0 +1,47 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>ExcelScry — a delimited file's delimiter and encoding</title>
+<style>
+  body { margin: 0; background: #1b1d22; color: #c9cdd6;
+         font: 14px/1.5 Segoe UI, system-ui, sans-serif; }
+  figure { margin: 0; }
+  img { display: block; width: 100%; height: auto; }
+  figcaption { padding: 12px 16px; }
+  code { color: #8fd3ff; }
+</style>
+<figure>
+  <img src="text-dialect.png"
+       alt="ExcelScry showing a semicolon-separated CSV read with that delimiter">
+  <figcaption>
+    A <code>.csv</code> read with the wrong delimiter puts every record in
+    column&nbsp;A. The bar above the grid says what the file was read with —
+    <code>Read as comma · UTF-8</code> — and offers the alternatives: a comma,
+    semicolon, tab or pipe, and UTF-8, Windows-1252 or UTF-16 either way round.
+    This one is semicolon-separated with decimal commas, so choosing
+    <code>semicolon</code> and <code>Windows-1252</code> re-reads it: the header
+    becomes four columns and <code>1,50</code> stays the value the file holds.
+    A read that cannot decode the bytes says so and suggests another encoding;
+    Reload re-reads with the choices in place, and <em>Auto</em> puts the guess
+    back. (Shown in the UI harness, which serves this front end against mocked
+    rows.)
+  </figcaption>
+</figure>
+<figure>
+  <img src="encoding-detected.png"
+       alt="ExcelScry opening a Windows-1252 CSV with every select left on Auto">
+  <figcaption>
+    A <code>.csv</code> written by a Windows tool, with <strong>café</strong>,
+    <strong>naïve</strong> and <strong>Zürich</strong> in it. Nobody chose an
+    encoding: <em>Auto</em> stands in both selects, the read worked out
+    <code>Windows-1252</code> from bytes that are not UTF-8, and the bar says
+    so — no replacement characters, no picker. UTF-16 without a byte order mark
+    is recognised the same way, from the zero byte beside every character.
+    Choosing UTF-8 by hand for this file is what still brings up the hint, and
+    in the app the bytes it cannot decode show as replacement characters: that
+    is what the two selects are now for. Whatever is chosen here is remembered
+    for that file, so reopening it reads it the same way; choosing
+    <em>Auto</em> forgets the choice and lets the bytes decide again. (Shown in
+    the UI harness, which serves this front end against mocked rows; its rows
+    are already decoded, so only the bar's hint changes when UTF-8 is chosen.)
+  </figcaption>
+</figure>

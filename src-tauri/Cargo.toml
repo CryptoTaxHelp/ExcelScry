@@ -25,6 +25,10 @@ calamine = { version = "0.36.1", features = ["dates"] }
 # from the package and rendered here; `ssfmt` implements Excel's format-code
 # grammar, including its sections, bracket currency and date tokens.
 ssfmt = "0.1.2"
+# Decoding a delimited file in the encoding the user picks. Already in the tree
+# through reqwest, so this adds no compiled code; a CSV from a Windows tool is
+# Windows-1252 far more often than it is valid UTF-8.
+encoding_rs = "0.8"
 # Already in the tree via calamine; used directly to read the style parts of a
 # package, which calamine does not expose.
 quick-xml = "0.41"

@@ -77,6 +77,29 @@ function tallCell(r, c) {
   return null;
 }
 
+function layoutCell(r, c) {
+  if (r === 0) {
+    // The banner is merged across A:D, so only its anchor holds anything.
+    return c === 0 ? ["s", "Quarterly totals — merged across four columns"] : null;
+  }
+  if (r === 1) {
+    const headers = ["Region", "Units", "Notes over two columns"];
+    return c <= 2 && headers[c] ? ["s", headers[c]] : null;
+  }
+  if (r === 3 && c === 0) return ["s", "tall merged cell"];
+  if (r === 10 && c === 1) return ["s", "block of six cells"];
+  if (r >= 2 && r <= 30) {
+    switch (c) {
+      case 0: return r === 4 ? null : ["s", `Region ${r % 4}`];
+      case 1: return ["i", String(r * 17)];
+      case 2: return ["s", `note ${r}`];
+      case 3: return ["f", `${(r % 10) * 1.5}%`];
+      default: return null;
+    }
+  }
+  return null;
+}
+
 function markupCell(r, c) {
   if (c !== 0) return null;
   const values = [
@@ -101,7 +124,103 @@ const SHEETS = [
   { name: "Wide sheet", rows: 60, cols: 140, firstUsed: 0, cell: wideCell },
   { name: "Tall sheet", rows: 50000, cols: 4, firstUsed: 0, cell: tallCell },
   { name: "Unicode & escaping", rows: 12, cols: 3, firstUsed: 0, cell: markupCell },
+  { name: "Sized & merged", rows: 80, cols: 8, firstUsed: 0, cell: layoutCell },
 ];
+
+// What the backend reports for that sheet: two workbook defaults, four column
+// widths, three row heights and four merged regions. The rest keep the
+// workbook's own 64 x 20.
+const LAYOUTS = {
+  "Wide sheet": {
+    // The header row and the index column are frozen: scrolling right keeps
+    // the row labels, scrolling down keeps the column names.
+    defaultColWidth: null,
+    defaultRowHeight: null,
+    colWidths: [],
+    rowHeights: [],
+    merges: [],
+    frozenCols: 1,
+    frozenRows: 1,
+  },
+  "Sized & merged": {
+    defaultColWidth: 64,
+    defaultRowHeight: 20,
+    colWidths: [
+      [0, 180],
+      [1, 70],
+      [2, 150],
+      [3, 60],
+    ],
+    rowHeights: [
+      [0, 44],
+      [3, 32],
+      [10, 30],
+    ],
+    merges: [
+      { row: 0, col: 0, rows: 1, cols: 4 },
+      { row: 1, col: 2, rows: 1, cols: 2 },
+      { row: 3, col: 0, rows: 2, cols: 1 },
+      { row: 10, col: 1, rows: 3, cols: 2 },
+    ],
+  },
+};
+
+// What `get_rows` serves: the sheets of the workbook that was opened last.
+let OPENED = SHEETS;
+
+// A delimited file for the text bar, at `#csv`. It is semicolon-separated with
+// decimal commas, so the comma a `.csv` starts with leaves it in one column -
+// which is the state the bar exists to fix. The encoding is reported as
+// undecodable until one is chosen, so the hint can be seen too.
+const CSV_TEXT =
+  [
+    "Region;Product;Units;Price;Ordered;Margin;Owner;Notes;Status;Warehouse;Carrier;Reference",
+    ...Array.from(
+      { length: 200 },
+      (_, i) =>
+        `Region ${i + 1};Widget ${i + 1};${12 + i};1,${String(50 + i).slice(-2)};` +
+        `2026-01-${String((i % 28) + 1).padStart(2, "0")};${5 + (i % 9)}%;` +
+        `Buyer ${i + 1};Reorder at the end of the quarter;Open;WH-${(i % 4) + 1};` +
+        `Carrier ${(i % 3) + 1};REF-${1000 + i}`
+    ),
+  ].join("\n") + "\n";
+const DELIMITERS = { comma: ",", semicolon: ";", tab: "\t", pipe: "|" };
+
+// A second delimited file, at `#preamble`: a title and a note above the column
+// names, the shape that makes the header row a choice rather than a fact.
+const REPORT_TEXT =
+  [
+    "Quarterly export, all regions",
+    "Generated 2026-01-05 by the warehouse system",
+    "Region,Product,Units,Price,Ordered,Margin,Owner,Notes,Status,Warehouse,Carrier,Reference",
+    ...Array.from(
+      { length: 40 },
+      (_, i) =>
+        `Region ${i + 1},Widget ${i + 1},${12 + i},1.${String(50 + i).slice(-2)},` +
+        `2026-01-${String((i % 28) + 1).padStart(2, "0")},${5 + (i % 9)}%,` +
+        `Buyer ${i + 1},Reorder at the end of the quarter,Open,WH-${(i % 4) + 1},` +
+        `Carrier ${(i % 3) + 1},REF-${1000 + i}`
+    ),
+  ].join("\n") + "\n";
+
+// A third delimited file, at `#legacy`: an export from a Windows tool, with
+// accented text a UTF-8 reader would not decode. The mock reports what the Rust
+// side now works out for such a file: Windows-1252, with nobody choosing it.
+const LEGACY_TEXT =
+  [
+    "Region,Product,Units,Price,Notes",
+    ...Array.from(
+      { length: 40 },
+      (_, i) =>
+        `Region ${i + 1},Widget ${i + 1},${12 + i},1,${String(50 + i).slice(-2)},` +
+        `caf\u00e9 na\u00efve r\u00e9sum\u00e9; deliver to Z\u00fcrich`
+    ),
+  ].join("\n") + "\n";
+
+// The per-file choices, mirroring the Rust side's text-dialects.json: only
+// what a bar change made explicit is stored, and a first open or a reload
+// starts from it.
+const REMEMBERED = new Map();
 
 // Opening a mock path ending in these names exercises each badge state.
 const TRUST_REPORTS = {
@@ -175,9 +294,61 @@ function trustFor(path) {
   return TRUST_REPORTS.xlsx;
 }
 
+const ENCODING_LABELS = {
+  "windows-1252": "Windows-1252",
+  "utf-16le": "UTF-16 LE",
+  "utf-16be": "UTF-16 BE",
+};
+
+function textWorkbook(path, delimiter, encoding) {
+  const name = String(path);
+  const legacy = name.includes("legacy");
+  const source = legacy ? LEGACY_TEXT : name.includes("report") ? REPORT_TEXT : CSV_TEXT;
+  const separator = DELIMITERS[delimiter] || ",";
+  const rows = source.split("\n")
+    .filter((line) => line.length > 0)
+    .map((line) => line.split(separator));
+  const sheet = {
+    name: String(path)
+      .split(/[\\/]/)
+      .pop()
+      .replace(/\.[^.]+$/, ""),
+    rows: rows.length,
+    cols: Math.max(...rows.map((row) => row.length)),
+    firstUsed: 0,
+    cell: (r, c) => (rows[r] && rows[r][c] !== undefined ? ["s", rows[r][c]] : null),
+  };
+  OPENED = [sheet];
+  return {
+    path,
+    fileName: String(path).split(/[\\/]/).pop(),
+    format: "Comma-Separated Values (csv)",
+    fileSize: source.length,
+    truncated: false,
+    totalCells: 0,
+    usedCells: rows.reduce((count, row) => count + row.length, 0),
+    trust: TRUST_REPORTS.xlsx,
+    sheets: [
+      { name: sheet.name, rows: sheet.rows, cols: sheet.cols, usedCells: 0, firstUsedRow: 0 },
+    ],
+    text: {
+      delimiter: delimiter || "comma",
+      // What the read settled on: the chosen encoding, or the one the bytes
+      // were recognised as.
+      encoding: encoding ? ENCODING_LABELS[encoding] || "UTF-8" : legacy ? "Windows-1252" : "UTF-8",
+      delimiterChosen: Boolean(delimiter),
+      encodingChosen: Boolean(encoding),
+      // A legacy file read as UTF-8 on purpose is the case that still needs
+      // the hint; every automatic read of it succeeds.
+      undecodable: legacy && encoding === "utf-8",
+    },
+  };
+}
+
 function workbookInfo(path) {
   const name = String(path).split(/[\\/]/).pop();
   const trust = trustFor(path);
+  OPENED = SHEETS;
   return {
     path,
     fileName: name,
@@ -193,6 +364,13 @@ function workbookInfo(path) {
       cols: s.cols,
       usedCells: 0,
       firstUsedRow: s.firstUsed,
+      colWidths: LAYOUTS[s.name] ? LAYOUTS[s.name].colWidths : [],
+      rowHeights: LAYOUTS[s.name] ? LAYOUTS[s.name].rowHeights : [],
+      defaultColWidth: LAYOUTS[s.name] ? LAYOUTS[s.name].defaultColWidth : null,
+      defaultRowHeight: LAYOUTS[s.name] ? LAYOUTS[s.name].defaultRowHeight : null,
+      merges: LAYOUTS[s.name] ? LAYOUTS[s.name].merges : [],
+      frozenCols: LAYOUTS[s.name] ? LAYOUTS[s.name].frozenCols || 0 : 0,
+      frozenRows: LAYOUTS[s.name] ? LAYOUTS[s.name].frozenRows || 0 : 0,
     })),
   };
 }
@@ -201,11 +379,35 @@ const UPDATE_AVAILABLE = true;
 
 const HANDLERS = {
   initial_file: () => null,
-  pick_workbook: () => "/mock/ExcelScry-sample.xlsx",
-  open_workbook: ({ path }) => workbookInfo(path),
+  // `#csv` opens the delimited sample instead, so the text bar can be seen;
+  // `#preamble` opens one whose header is not its first row.
+  pick_workbook: () =>
+    location.hash === "#preamble"
+      ? "/mock/Exported-report.csv"
+      : location.hash === "#legacy"
+        ? "/mock/legacy-export.csv"
+        : location.hash === "#csv"
+          ? "/mock/ExcelScry-sample.csv"
+          : "/mock/ExcelScry-sample.xlsx",
+  open_workbook: ({ path, delimiter, encoding, dialectExplicit }) => {
+    const name = String(path).toLowerCase();
+    if (!name.endsWith(".csv") && !name.endsWith(".tsv")) return workbookInfo(path);
+    const remembered = REMEMBERED.get(path) || {};
+    const explicit = Boolean(dialectExplicit);
+    // A choice in the bar is complete on its own: Auto means auto now, not the
+    // remembered value again. Anything filled in from the store is listed as
+    // chosen, so the bar's selects show it.
+    const effectiveDelimiter = explicit ? delimiter || "" : delimiter || remembered.delimiter || "";
+    const effectiveEncoding = explicit ? encoding || "" : encoding || remembered.encoding || "";
+    if (explicit) {
+      if (!delimiter && !encoding) REMEMBERED.delete(path);
+      else REMEMBERED.set(path, { delimiter: delimiter || "", encoding: encoding || "" });
+    }
+    return textWorkbook(path, effectiveDelimiter, effectiveEncoding);
+  },
   close_workbook: () => null,
   get_rows: ({ sheet, rowStart, rowCount, colStart, colCount }) => {
-    const s = SHEETS[sheet];
+    const s = OPENED[sheet];
     const rEnd = Math.min(rowStart + rowCount, s.rows);
     const cEnd = Math.min(colStart + colCount, s.cols);
     const rows = [];
