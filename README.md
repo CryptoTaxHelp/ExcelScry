@@ -24,23 +24,76 @@ registers ExcelScry with Windows' Default Apps list.
   The bytes settle the encoding before the first record is read: UTF-8 when
   they are UTF-8, UTF-16 either way round with or without a byte order mark
   (the zero byte beside every character gives a Windows tool's export away),
-  and Windows-1252 when they are not UTF-8 at all — so a legacy file's
-  accented names open correctly without touching anything. A delimiter that
+  and, for bytes that are neither, the encoding is read statistically from the
+  file's own text. That is what makes a Japanese export open as Japanese: the
+  detector weighs the candidate encodings by what they can decode and by the
+  character pairs their languages actually use, so Shift_JIS, EUC-JP,
+  ISO-2022-JP, GBK, Big5 and EUC-KR are each recognised, as are the Windows
+  code pages (`1250`–`1258` and `874`), ISO-8859-2, -4, -5, -6, -7, -8 and
+  -13, KOI8-U and IBM866 — a Cyrillic, Greek or Hebrew file no longer arrives
+  as a wall of Western mojibake. A file with only a handful of
+  accented bytes is not enough text to choose from, and is read as
+  Windows-1252, which is what such a file almost always is. A delimiter that
   reads either way is still a guess, and a bar above the grid names the
   delimiter and encoding the file was read with and can re-read it with
-  another: comma, semicolon, tab or pipe; UTF-8, Windows-1252 or UTF-16 either
-  way round. Reload keeps the choice, and Auto puts the guess back. A choice is
+  another: comma, semicolon, tab or pipe; UTF-8, UTF-16 either way round, or any
+  of those legacy encodings chosen from a list grouped by script. Reload keeps
+  the choice, and Auto puts the guess back. A choice is
   remembered for the file it was made for, so the weekly export that arrives
   semicolon-separated is opened that way next week without touching the bar;
-  choosing Auto forgets it again. The first record
-  stays pinned above the grid as you scroll — in a delimited file that row is
+  editing or replacing the file drops it, because a new export at the same path
+  should be read by its own bytes. Choosing Auto forgets it again. The first
+  record stays pinned above the grid as you scroll — in a delimited file that row is
   the header, and its row number rides along with it. A file exported with a
   title or a note above its column names can name another row instead: the
   bar's *Header row* field, or a click on that row's number, moves the pin, and
   everything above the chosen row scrolls away with the rest. Clearing the
   field, or clicking the chosen number again, leaves nothing pinned; the
   choice survives a reload or another delimiter, because it belongs to the open
-  file rather than to its bytes.
+  file rather than to its bytes, and it is kept between sessions like the
+  delimiter: the weekly export reopens with row 3 still held above the grid, and
+  a file deliberately left unpinned reopens with no header rather than its
+  first record coming back. That row also names the columns: the strip along
+  the top of the grid reads *Region*, *Product*, *Units* instead of A, B, C,
+  with the letter kept in the tooltip and a long name cut with an ellipsis. A
+  column whose header cell is empty keeps its letter, unpinning puts every
+  letter back, and a workbook keeps them always — its rows are data, not a
+  table with a header. A file read in another encoding can then be
+  saved back out as UTF-8: the bar offers *Save a copy as UTF-8* while the
+  encoding is anything but UTF-8, which writes the same records with the same
+  quoting and line endings through the decoder the grid used, so the accented
+  names that were shown are the ones written. It saves a copy under a new name
+  and never rewrites the original, which is also why the button disappears once
+  the file is read as UTF-8 — there would be nothing to convert.
+- **A delimited file's rows can be ordered by one of its columns.** A CSV that
+  arrives in whatever order the last export wrote it in reads as a wall of
+  records. Clicking a named column's head in the strip now sorts the records by
+  that column, and clicking it again reverses the order — the head keeps an
+  arrow saying which one is showing, and the status bar repeats it. Numbers
+  compare as numbers, so `9` comes before `10`; text compares without regard to
+  case; a blank field sorts last whichever direction is asked for. The pinned
+  header and anything above it keep their places, so an export with a title or
+  a note still reads as a document rather than having its preamble shuffled
+  into the data. This is a view of the rows, not an edit: the file on disk is
+  never written, and a reload reads the records back as the file has them. A
+  workbook keeps its own row order — its rows are a layout, not a list of
+  records — so its column heads stay plain letters and are not sort controls.
+- **Every file reopens where it was left.** A workbook is rarely read from its
+  first row, and getting back to the place meant scrolling there again. The
+  grid now remembers, per file, the sheet that was in front, the cell that was
+  selected and the scroll offset, and puts all three back when the file is
+  opened again; a workbook reopens on the tab that was in front, with that
+  tab's own position. The position is written a moment after the moving stops,
+  so moving around is not a write per keypress, and a move still waiting when
+  another file is opened is written first, against the file it belongs to. The
+  store records each file's length and modification time beside the position,
+  so a different export put at the same path opens at its own top instead of
+  inheriting the row the old file was left on; an unreadable store is ignored
+  and the file opens at A1 as it would have.
+- **Recent files are one click away.** The welcome screen lists the last eight
+  files opened, newest first, with the full path under the name; clicking one
+  opens it again. The list is stored per user and pruned when a file is gone,
+  and another spelling of the same path does not appear twice.
 - **Says what the file carries before you open it elsewhere.** A badge in the
   status bar reports macros, external links, external data connections,
   embedded objects and ActiveX controls, and opens a dialog with the detail.
@@ -56,6 +109,12 @@ registers ExcelScry with Windows' Default Apps list.
   LibreOffice stores it in the ODS view settings, and both are read. Clicking,
   arrow keys and scrolling all work across the frozen boundary; a text table's
   chosen header row remains a separate pin.
+- **The sheet's own emphasis and colours are visible.** Bold and italic text,
+  text colours and cell fills are drawn in the grid, including a filled cell
+  with no value, so a report opens looking like the table its author made. The
+  styles come from the same `.xlsx`/`.xlsm` style tables and ODF cell styles
+  that the export already carried; the app keeps its own font, alignment and
+  value-type colours where the file sets nothing.
 - **Viewing an `.ods` is not a lesser mode.** Times of day stored the ODF way
   (`office:time-value`) are read as clock times rather than as their raw
   duration string, spans longer than a day keep rendering as `36:00:00`, and a
@@ -65,7 +124,28 @@ registers ExcelScry with Windows' Default Apps list.
   spreadsheet rather than a wall of text. Bold, italic, text and fill colours,
   the sheet's column widths and row heights, and its merged regions travel with
   it, as do a format's negative and zero sections and their colours, and the
-  first used row is styled bold.
+  first used row is styled bold. A section with nothing in it keeps hiding what
+  it hid — `#,##0;-#,##0;` exports with blank zeros, not zeroes — and a
+  format's fourth section for text travels with it, so `0.00;[Red]-0.00;0.00;"T: "@`
+  labels a text cell while the numbers beside it keep their digits. A calculated cell keeps its **formula**
+  beside the value it produced, translated into OpenFormula (`SUM(B2:B3)`
+  becomes `of:=SUM([.B2:.B3])`), so the report recalculates when it is
+  reopened rather than staying frozen at the numbers it was exported with.
+  Rows and columns the sheet hides stay hidden, and the sheet's **frozen
+  panes** are written back as view settings, so a report opens at the same
+  place it was laid out rather than as a flat wall of every row.
+- **Rows and columns the sheet hides are collapsed, not shown as empty.** A
+  report that hides a column of workings or a block of detail rows used to
+  open with them in place, reading as blank cells and pushing everything else
+  along; the grid now collapses them where the sheet did, and leaves a seam in
+  the number or letter strip where each run was — with the count on hover —
+  that lays them back out when clicked. The toolbar offers the whole sheet at
+  once (*Show 3 rows and 1 column*, then *Hide them again*), revealed rows and
+  columns are washed with a stripe and their number or letter struck through
+  since they are still hidden in the file, and the arrow keys and the pointer
+  step over a collapsed run instead of landing on it. Opening another file or
+  switching sheets goes back to the sheet's own choice, and an export writes
+  the hidden state it read.
 - **Cells are shown with the number format the workbook gives them.** Money as
   `$23,988.00` or `[$€-407] #,##0.00`, percentages as `35.0%`, dates as
   `15/01/2026` or `January 9, 2026`, times as `09:30` and elapsed spans past a
@@ -73,7 +153,22 @@ registers ExcelScry with Windows' Default Apps list.
   `xl/styles.xml` for Excel, `number:*` styles for ODF — which the reader does
   not expose, so they are read separately and rendered with Excel's own
   format-code rules; ODF styles are translated into that grammar. Values stay
-  typed, so an export still writes numbers and dates rather than text.
+  typed, so an export still writes numbers and dates rather than text. A
+  format that shows nothing — `#,##0;-#,##0;` for a zero, `;;;` for anything —
+  leaves the cell blank as the sheet renders it, but not unmarked: a corner dot
+  says the cell holds a value, the readout names what is behind the blank
+  (`NUMBER · HIDDEN` and the `0` in grey), and the tooltip says the number
+  format is hiding it, so a hidden zero is not read as an empty cell.
+- **A calculated cell says what it is calculated from.** A formula's cached
+  value is what the sheet shows, so a total used to look exactly like a number
+  somebody typed. Cells the file calculates now carry a small triangle in their
+  bottom-right corner, hovering one names its formula, and selecting one puts
+  that formula beside the value in the readout — `G7`, `$16,431.78`, then
+  `=D7*E7`. It is shown with one leading `=` whatever syntax the file writes:
+  Excel's `D7*E7` and an ODS's `of:=D7*E7` both read `=D7*E7`, while the text
+  the export writes stays the reader's own. A cell whose formula came with no
+  cached value is still a cell, marked like the rest rather than left out as
+  empty.
 - **Virtualised grid**: only the cells in view exist in the DOM and cells are
   fetched in tiles as you scroll, so a 500,000-row sheet stays responsive.
 - Unformatted cells keep the spreadsheet conventions: numbers right-aligned,
@@ -227,9 +322,14 @@ ExcelScry.exe "C:\path\book.xlsx"   # open a workbook straight away
   its number format — money stays money, dates stay dates, percentages stay
   percentages — and its bold/italic, text colour, fill, column width and row
   height. Merged regions stay merged, and a blank column at the edge of the
-  report keeps its width.
+  report keeps its width. A calculated cell keeps its formula as well, so the
+  reopened file can recalculate it. Hidden rows and columns stay hidden,
+  frozen panes stay frozen, and a hidden column keeps the width it will have
+  when it is shown again.
 - **Reload** — re-read the file from disk.
-- Arrow keys, `PageUp`/`PageDown`, `Home`/`End` — move the selection.
+- Arrow keys, `PageUp`/`PageDown`, `Home`/`End` — move the selection, stepping
+  over any rows or columns the sheet hides rather than landing on a cell that
+  is collapsed away.
 - `Ctrl+C` — copy the selected cell's text.
 
 ## Updates
@@ -350,11 +450,12 @@ cargo tauri signer generate -w ~/.tauri/ExcelScry.key
   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` is needed; set both if that ever changes.
 
 The release and installer jobs both hold that secret to the committed pubkey
-before they build ([verify_signing_key.py](scripts/verify_signing_key.py)), so a
-secret that was never set, or that holds another key's material, stops either
-run in about a second — rather than after a full compile, as an exit 1 from
-`tauri build` that says nothing about a secret, or after publishing, as an
-update no installed copy will take. The installer job runs the same script as
+before they build ([verify_signing_key.py](scripts/verify_signing_key.py)), and
+`release.py` runs the same check on the developer's key before it writes a local
+release, so a secret that was never set, or that holds another key's material,
+stops a build or a local release in about a second — rather than after a full
+compile, as an exit 1 from `tauri build` that says nothing about a secret, or
+after publishing, as an update no installed copy will take. The installer job runs the same script as
 the release job rather than a check of its own, so the two cannot drift apart.
 
 Rotate by generating a new keypair, putting its **public** half in
@@ -410,12 +511,15 @@ src-tauri/
   updater-keys.json     the key roll releases publish: keys handed over, keys retired
   src/
   main.rs               Tauri commands, window setup, single-instance handling
+  recent.rs             remembering recently opened files for the welcome screen
   model.rs              cell model and per-type display formatting
   number_format.rs      rendering a cell through its format code (via ssfmt)
   cell_styles.rs        reading per-cell formats, bold/italic and colours out of
                         xlsx and ods packages
   workbook.rs           reading via calamine, absolute-coordinate normalisation
-  text_table.rs         reading .csv/.tsv records into the same cell model
+  text_table.rs         reading .csv/.tsv records into the same cell model, and
+                        working out and decoding their encoding (via chardetng)
+  text_export.rs        writing a UTF-8 copy of a delimited file
   ods_export.rs         writing ODS via spreadsheet-ods
   ods_formats.rs        translating format codes into ODF number styles
   sheet_layout.rs       reading column widths, row heights, merges and freezes
@@ -458,7 +562,7 @@ samples/                sample files covering the awkward cases: one with a
 ## Tests
 
 ```bash
-cd src-tauri && cargo test        # 168 unit tests
+cd src-tauri && cargo test        # 214 unit tests
 cd src-tauri && cargo clippy --all-targets
 ```
 
@@ -468,6 +572,28 @@ The tests cover the parts that are easy to get subtly wrong:
   numbers stay numeric, that a date keeps its calendar day, that 36 hours stays
   a 36-hour duration, and that a block that starts at row 5 / column C is still
   at row 5 / column C afterwards;
+- **hidden rows, hidden columns and frozen panes surviving the export**: a
+  sheet with a hidden column, a hidden row inside its data and another past
+  the end of it, plus one frozen row and column, is exported, reopened through
+  the app's own open path, and must come back with exactly those positions
+  hidden, the same freeze, and the hidden column's width intact; the reading
+  side is covered for both `.xlsx` (`hidden="1"`, including a hidden column
+  with no width of its own) and `.ods` (`table:visibility="collapse"`, over a
+  repeated column), hiding with no size at all still counts as layout, and the
+  view settings are checked to stay well-formed when a sheet name needs
+  escaping;
+- **the grid's view of what a sheet hides**: the sheet info carries the
+  hidden rows and columns as inclusive runs — adjacent positions joined, a gap
+  splitting them — so a sheet that hides the rest of its rows is one pair
+  rather than a million positions, and the runs make it through the IPC shape
+  the front end reads;
+- **formulas surviving the export**: a sheet holding an Excel-spelled formula,
+  one already in OpenFormula and one that cannot be expressed faithfully is
+  exported, reopened through the app's own open path, and must come back with
+  the first two rewritten as OpenFormula (`SUM(B2:B3)` → `of:=SUM([.B2:.B3])`,
+  `B2*10` → `of:=[.B2]*10`) beside their cached values, while the third keeps
+  only the value it had; a hand-built `.xlsx` verifies that reading keeps each
+  formula at its true row and column and expands a shared formula per cell;
 - **number formats surviving the export**: every formatted cell of a sheet is
   written, reopened through the app's own open path, and must display exactly
   what it displayed before — `[$€-407] #,##0.00` as `€ 1,234.50`, `0.00%` as
@@ -524,7 +650,15 @@ The tests cover the parts that are easy to get subtly wrong:
   `number:percentage-style`, `number:date-style` and `number:time-style`,
   including column defaults and repeated rows, a three-section code's red
   negative and dash-for-zero written as `style:map` conditions on coloured
-  number styles, and their return through the app's own reader; the renderer is
+  number styles, and their return through the app's own reader; hide-zero
+  codes (`#,##0;-#,##0;`) and four-section codes with a text label are
+  exported and reopened to check that the zero stays blank, the label lands on
+  text only, and an all-literal fourth section (`"n/a"`) shows for any text;
+  the rows the grid reads name the value a format hides (a zero under
+  `#,##0;-#,##0;`) while an empty string and an empty cell stay unmarked, and
+  carry the formula a calculated cell was computed from, with a formula whose
+  value the file never cached still reaching the grid as a cell;
+  the renderer is
   tested against bracket currencies, negative sections, `[h]:mm:ss` spans, text sections,
   ungrammatical codes and integers past 2^53, where formatting would print
   digits the file does not contain and the exact value wins;
@@ -552,8 +686,26 @@ The tests cover the parts that are easy to get subtly wrong:
   `.csv` and `.tsv` open through `workbook::load_with` with their record
   boundaries intact; and the per-file memory of those choices — keyed by a
   canonical path so another spelling of the same file finds it, filled in on a
-  first open but not on an explicit Auto, replaced by the latest choice, and
-  ignored rather than breaking an open when its store is damaged;
+  first open but not on an explicit Auto, replaced by the latest choice,
+  dropped when the file's size or modification time has moved on, and ignored
+  rather than breaking an open when its store is damaged; the header row kept
+  beside them and left alone by a later dialect change, an unpinned file stored
+  as a choice rather than as "nobody chose", a replaced file starting again
+  from its first record, and the row surviving the store being read back in
+  each of its three states; twelve files written
+  in the encodings a Windows tool falls back to — Japanese in Shift_JIS, EUC-JP
+  and ISO-2022-JP, Chinese in GBK and Big5, Korean in EUC-KR, Russian in
+  windows-1251 and KOI8-R, and Polish, Greek, Hebrew and Arabic in their code
+  pages — each opening as the characters it holds and having its encoding named
+  on the bar, a Japanese export whose first sixty-four kilobytes are ASCII
+  still found through the whole-file fallback, a sample too short to score
+  staying Windows-1252, and a chosen Shift_JIS used as chosen; a UTF-8 copy of a
+  Windows-1252 file spelling the characters the grid showed while its quoting
+  and line endings survive and the original stays byte for byte as it was, a
+  UTF-16 file copied without carrying its byte order mark, and a copy refused
+  both for a file already read as UTF-8 and for a destination that is the
+  original under another name or spelling; the recent-files list
+  is newest first, deduplicated by path, capped, and pruned when a file is gone;
 - display formatting for large integers (no `f64` round trip), fractional
   numbers, times and durations;
 - the package inspector, driven from zips built in memory: each signal is found
@@ -583,14 +735,26 @@ the same table with its own style definitions.
 `samples/ExcelScry-sample.csv` and `.tsv` — CRLF, quoted fields and all — and
 [docs/csv-verification.html](docs/csv-verification.html) shows the comma file
 opening. [docs/text-dialect.html](docs/text-dialect.html) shows the bar that
-re-reads one with another delimiter or encoding, and that same bar naming a
-Windows-1252 read nobody chose, and
+re-reads one with another delimiter or encoding, that same bar naming a
+Windows-1252 read nobody chose, and a Japanese export read as Shift_JIS, and
 [docs/frozen-header.html](docs/frozen-header.html) shows a text table's first
 record pinned above the scrolling rows, and
 [docs/header-row.html](docs/header-row.html) shows a run whose column names are
-its third record, pinned by number rather than assumed.
+its third record, pinned by number rather than assumed, and
+[docs/sort-columns.html](docs/sort-columns.html) shows that same run ordered by
+its `Units` column, highest first, with its title and note left where they
+were, and [docs/remembered-view.html](docs/remembered-view.html) shows it
+reopening near its last records with its cell still selected.
 [docs/sheet-geometry.html](docs/sheet-geometry.html) shows a sheet laid out by
 its own column widths, row heights and merged regions.
+[docs/cell-styles.html](docs/cell-styles.html) shows a report whose header,
+italic notes and filled blank cell are drawn with the workbook's own styling,
+[docs/hidden-rows.html](docs/hidden-rows.html) shows a sheet whose hidden
+column and rows are collapsed and then revealed,
+[docs/formulas.html](docs/formulas.html) shows a calculated column marked and
+its formula in the readout, and
+[docs/hidden-value.html](docs/hidden-value.html) shows the grid marking a zero
+and a text value that their own number formats hide.
 
 ### UI harness
 
@@ -601,14 +765,30 @@ of the Tauri bridge that reproduces the IPC contract exactly (including
 `get_rows` returning the same clamped camelCase page shape as the Rust side).
 Open that file in a browser to exercise the grid, tabs, virtual scrolling,
 dialogs and escaping without a build. It is a development tool and is not
-shipped. Its *Wide sheet* freezes its first row and first column, so the
-frozen panes can be scrolled and clicked without a workbook. Its mock has an
+shipped. Its *Sales report* and *Sized & merged* sheets carry bold and italic
+cells, text colours and fills, including a filled blank, so the grid's styling
+can be seen without a workbook, and its *Sales report* carries a hidden zero
+and a hidden text value, so the corner mark and the readout that names what
+is behind the blank can be seen too. That same sheet reports a hidden column
+and a hidden block of rows, so the collapsed seams, the toolbar that reveals
+them and the striped wash they get when shown can all be exercised without a
+workbook, and its calculated `Revenue` column carries a formula, so the corner
+mark, the tooltip and the readout's aside can be seen too. Its *Wide sheet* freezes its first row and first
+column, so the frozen panes can be scrolled and clicked without a workbook. Its mock has an
 Excel workbook and, at `ui-harness.html#csv`, a
 200-row delimited file with twelve columns — enough rows and columns to scroll
 both ways, so the pinned first row and the text bar can be seen working. At
 `ui-harness.html#preamble` a shorter export carries a title and a note above its
-column names, so a header other than the first record can be chosen and the
-strip followed as it pins. One mock sheet, *Sized & merged*, carries column
+column names, so a header other than the first record can be chosen, the strip
+followed as it pins, the column heads relabelled with it, and a click on one of
+those names sorting the records below the header — a second click reversing
+them, with the arrows and the status bar to show for it. The mock also keeps
+each file's sheet, cell and scroll offset the way the app does, so closing the
+file and opening it again lands back where it was left. At `ui-harness.html#legacy` a third file reports
+itself as Windows-1252 read nobody chose, so *Save a copy as UTF-8* is on offer
+and its success message can be seen; at `ui-harness.html#legacy-jp` a Japanese
+export reports itself as Shift_JIS, with the picker still on Auto and every
+encoding the detector can name offered in it. One mock sheet, *Sized & merged*, carries column
 widths, row heights and four merged regions, so the geometry, hit-testing and
 arrow-key behaviour can be exercised without a build.
 
@@ -632,6 +812,7 @@ python scripts/manifest_keys.py --check
 python scripts/test_manifest_urls.py
 python scripts/test_signing_key.py
 python scripts/verify_workflow.py
+python scripts/test_verify_workflow.py
 python scripts/test_release.py
 ```
 
@@ -653,6 +834,11 @@ jobs' steps and refuses a workflow that could make a release visible before its
 manifest was signed — a draft instead of a published release, a signing step
 moved after the publishing one, a publishing step that no longer checks what it
 is about to reveal, or another job asking the action for a release of its own.
+[`scripts/test_verify_workflow.py`](scripts/test_verify_workflow.py) then proves
+that verifier is still checking the signing-key preflight: it removes the step
+from each build job, and moves it after the build in each, in throwaway copies
+of the workflow, and requires the verifier to reject every copy. The copies are
+never written over the checkout.
 It also refuses either job whose signing-key preflight moved after the build, is
 missing, or has been replaced by a check of its own, which is the difference
 between finding a missing or wrong key in a second and finding it out from a
@@ -809,7 +995,16 @@ reported with the one command that finishes the job. It refuses to start unless:
 - the new version is a semantic version ahead of the current one, with no such
   tag locally or on the remote;
 - the `Unreleased` section has entries to move, and no section for the version
-  is there already.
+  is there already;
+- the updater signing key is present, and is the key `tauri.conf.json` trusts —
+  checked before anything is written, from `TAURI_SIGNING_PRIVATE_KEY` or
+  `~/.tauri/ExcelScry.key`, the same fallback the build scripts use.
+
+That key check runs the same [verify_signing_key.py](scripts/verify_signing_key.py)
+as the release and installer jobs, so the local flow cannot tag a commit no
+build will sign. A missing or wrong key stops before the version is written,
+and `--resume` makes the same check before it commits or pushes. `--dry-run`
+still reports the plan without needing a key.
 
 Before pushing it prints the notes the release page will carry, read from the
 commit it just tagged, so they can be read before they are published rather than
@@ -876,37 +1071,45 @@ starts all of it.
 
 ## Limitations
 
-- **A sheet's number formats, column widths, row heights, merged cells and
-  frozen panes are shown; its colours, fonts and borders are not.** Those live in the same style
-  tables calamine does not surface; the colour and font attributes are read
-  only so an export can carry them, while the grid itself keeps one uniform
-  look. Formats, sizes, merges, frozen panes, bold/italic and colours are read
-  for `.xlsx`, `.xlsm` and `.ods`; a legacy `.xls` or `.xlsb` keeps them in
-  binary records the reader does not expose, so those files fall back to
-  uniform 112 × 24 cells, plain number rendering and no exported styling.
-  Hidden columns and rows are shown at the size they carry rather than hidden,
-  and a freeze beyond the sheet's used rows or columns is not extended into
-  empty space. A sheet whose pixel height passes the browser's canvas limit is
+- **A sheet's number formats, column widths, row heights, merged cells,
+  frozen panes, bold/italic text, text colours and fills are shown; its font
+  names, sizes, underlines, borders and fill patterns are not.** The grid uses
+  the app's own font and only the solid colour of a patterned fill. Formats,
+  sizes, merges, frozen panes, bold/italic and colours are read for `.xlsx`,
+  `.xlsm` and `.ods`; a legacy `.xls` or `.xlsb` keeps them in binary records
+  the reader does not expose, so those files fall back to uniform 112 × 24
+  cells, plain number rendering, the app's uniform text look and no exported
+  styling.
+  Hidden columns and rows are still drawn in the grid at the size they carry,
+  though their hidden state now travels with the ODS export; a freeze beyond
+  the sheet's used rows or columns is not extended into empty space. A sheet whose pixel height passes the browser's canvas limit is
   scaled down as a whole so that it stays scrollable. Values themselves are
   shown exactly either way.
 - **A delimited file has no types.** Every `.csv`/`.tsv` value is text, so the
   grid left-aligns it and an export writes strings: `000123` stays an
-  identifier, but `19.99` does not become a number. Encodings are recognised
-  among UTF-8, UTF-16 (with or without a byte order mark) and Windows-1252; a
-  file in another legacy encoding — Shift-JIS, KOI8-R, GBK — is read as
-  Windows-1252 and shows the wrong accented characters until another is chosen
-  from the bar. UTF-16 in a script that needs both bytes for every character
-  (Greek, Cyrillic, CJK) is only recognised when it carries a BOM. A chosen
-  delimiter and encoding are remembered by path, not by what the file holds, so
-  a different file put at the same path keeps the old choices until the bar is
-  changed. The shell integration registers the spreadsheet formats, not
-  `.csv`/`.tsv`.
-- **Only a delimited file's header can be pinned, and only for as long as it is
-  open.** A workbook's rows pin nothing: any of them could be a heading, so
-  none is treated as one. The chosen header row is view state, not saved with
-  the file or remembered for the next time it is opened — a new open starts
-  from the first record.
-- **Formulas are shown as their last cached value**, not as formulas.
+  identifier, but `19.99` does not become a number. UTF-8 and UTF-16 (with or
+  without a byte order mark) are recognised as such; every other encoding is a
+  statistical guess from the first sixty-four kilobytes of the file, so a short
+  file, one that is mostly ASCII, or one whose text is unusual in its own
+  language can be attributed to the wrong alphabet — the bar then names what it
+  chose and the picker offers the rest. A file with fewer than eight non-ASCII
+  bytes has nothing to weigh and is read as Windows-1252. UTF-16 in a script
+  that needs both bytes for every character (Greek, Cyrillic, CJK) is only
+  recognised when it carries a BOM. Detection also only sees the start of the
+  file: text in another encoding much further in is found by the whole-file
+  fallback that runs when a field fails to decode, not before. A chosen
+  delimiter, encoding and header row are remembered by path together with the
+  file's size and modification time; editing or replacing the file drops all of
+  them and the next open starts from detection and the first record. A
+  replacement that leaves both size and timestamp identical is not noticed.
+  The shell integration registers the spreadsheet formats, not `.csv`/`.tsv`.
+- **Only a delimited file's header can be pinned.** A workbook's rows pin
+  nothing: any of them could be a heading, so none is treated as one. A
+  delimited file's chosen row is remembered for that path only, not saved into
+  the file, so it travels neither with the file nor to another machine.
+- **Formulas are shown as their last cached value**, not as formulas: the
+  grid and the cell readout show the number the workbook stored. The formula
+  itself is kept for the export, where it is written beside that value.
 - **Macros are never run.** A `.xlsm` opens as data; its VBA project is not
   executed, extracted or written anywhere. ExcelScry only ever reads.
 - Workbooks are read into memory. Beyond **2,000,000 cells** the remainder is
@@ -920,9 +1123,14 @@ starts all of it.
   third for zero — through ODF `style:map` conditions, so `($1,234.50)` stays
   parenthesised and a zero section of `"-"` stays a dash. A section's `[Red]`
   (or another named or indexed colour) becomes the text colour of that section's
-  number style, and is read back as the same section colour. An empty zero
-  section (hide zeros) is still not represented, and the alignment padding `_x`
-  and `*x` reserve are dropped. Fractions, scientific notation, sub-second precision,
+  number style, and is read back as the same section colour. A section with
+  nothing in it — the third of `#,##0;-#,##0;` that hides zeros, or an empty
+  negative — is mapped to a data style of the positive section's kind that
+  shows nothing, so the value comes back blank rather than unformatted; a
+  format's fourth section becomes a `number:text-style` and is used for text
+  cells only, and an empty fourth section (`0;;;`) hides text as it does in
+  Excel. The alignment padding `_x` and `*x` reserve are dropped.
+  Fractions, scientific notation, sub-second precision,
   single-letter months (`mmmmm`) and the Buddhist calendar are written as plain
   values rather than approximated. Cell text and fill colours are exported,
   with theme and indexed colours resolved to RGB and only the solid foreground
@@ -931,8 +1139,17 @@ starts all of it.
   column or row the source left at its default is written at that default;
   merged regions are written as spanning cells with their covered cells marked.
   Overlapping merges are written as the file describes them rather than being
-  repaired.
-- Exports are value-only; the ODS file contains no formulas.
+  repaired. Hidden rows and columns are written as collapsed rows and columns,
+  not by giving them a zero size, so they can be shown again with their width;
+  a freeze is written as LibreOffice's own view settings, which other readers
+  may ignore. The grid itself still shows every row and column: hiding is
+  honoured in the export, not in the view.
+- A formula is exported only when it can be written faithfully. A structured
+  reference (`Table1[Qty]`), a whole-row range (`1:1`) or a formula this app
+  cannot read back is exported as its cached value alone, so the reopened cell
+  shows the last number instead of a formula that would calculate wrongly. A
+  cell that was calculated but has no cached value is written with its formula
+  and no value, and a spreadsheet fills it in on load.
 - **Updates only exist from the first release built by the workflow**, and only
   for a strictly newer version. Installed copies of an older, pre-updater
   release cannot update themselves; they have to be replaced by hand once.

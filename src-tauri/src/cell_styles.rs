@@ -1222,27 +1222,31 @@ impl Scan {
 
     fn finish(&mut self, mut build: Build) {
         build.finish();
+        let negative = build
+            .maps
+            .iter()
+            .find(|(condition, _)| is_negative(condition))
+            .map(|(_, applied)| applied.clone());
+        let zero = build
+            .maps
+            .iter()
+            .find(|(condition, _)| is_zero(condition))
+            .map(|(_, applied)| applied.clone());
         if let Some(format) = NumberFormat::parse(&build.code, self.system) {
-            let negative = build
-                .maps
-                .iter()
-                .find(|(condition, _)| is_negative(condition))
-                .map(|(_, applied)| applied.clone());
-            let zero = build
-                .maps
-                .iter()
-                .find(|(condition, _)| is_zero(condition))
-                .map(|(_, applied)| applied.clone());
             self.parsed.insert(build.code.clone(), Some(format));
-            self.number.insert(
-                build.name,
-                NumberStyle {
-                    code: build.code,
-                    negative,
-                    zero,
-                },
-            );
         }
+        // A style with no content is what a `style:map` points at when a
+        // section hides a value (a hidden zero), so it is kept even though it
+        // parses to no format of its own. Dropping it would quietly unhide
+        // the value it was mapped from.
+        self.number.insert(
+            build.name,
+            NumberStyle {
+                code: build.code,
+                negative,
+                zero,
+            },
+        );
     }
 
     /// Resolve a cell style name to a parsed format.
@@ -1477,14 +1481,29 @@ impl Build {
         if self.kind == Kind::Percentage && self.has_number && !self.code.contains('%') {
             self.code.push('%');
         }
-        if self.kind == Kind::Text && !self.code.contains('@') {
-            self.code.insert(0, '@');
-        }
         // ODF carries a section's colour as text properties on its number
         // style; Excel spells the same thing as a leading `[Red]` section
         // token, which is what the rest of the app reads.
         if let Some(name) = self.colour.as_deref().and_then(colour_token) {
             self.code.insert_str(0, &format!("[{name}]"));
+        }
+        if self.kind == Kind::Text && !self.code.contains('@') {
+            if self.code.is_empty() {
+                // A text style with nothing in it shows nothing at all, which
+                // is how the fourth section of `0;;;` hides text. Spelled as
+                // the four empty sections Excel uses for the same thing.
+                self.code = ";;;\"\"".to_string();
+            } else if self.code.contains('"') {
+                // A text style with only literals shows those literals for
+                // text values. Excel writes that as a fourth section, whose
+                // empty first three also hide the numbers the style was never
+                // meant for.
+                self.code = format!(";;;{}", self.code);
+            } else {
+                // Nothing but a colour, or nothing at all: the cell's own text
+                // is what the style shows.
+                self.code.push('@');
+            }
         }
     }
 }
@@ -2050,6 +2069,43 @@ mod tests {
             .as_deref(),
             Some("36:00:00"),
             "a non-overflowing time style is a duration"
+        );
+    }
+
+    #[test]
+    fn ods_empty_zero_style_hides_the_zero() {
+        // A hide-zero format has an empty third section, which Calc writes as a
+        // data style with no parts at all. Following the map must keep that
+        // empty section, or the zero would fall back to the positive one.
+        let content = r##"<office:document-content
+            xmlns:office="o" xmlns:style="s" xmlns:table="t" xmlns:number="n" xmlns:text="x">
+          <office:automatic-styles>
+            <number:number-style style:name="N1">
+              <number:number number:decimal-places="0" number:min-integer-digits="1" number:grouping="true"/>
+              <style:map style:condition="value()=0" style:apply-style-name="N1zero"/>
+            </number:number-style>
+            <number:number-style style:name="N1zero"/>
+            <style:style style:name="ce1" style:family="table-cell" style:data-style-name="N1"/>
+          </office:automatic-styles>
+          <office:body><office:spreadsheet>
+            <table:table table:name="T">
+              <table:table-row>
+                <table:table-cell table:style-name="ce1" office:value-type="float" office:value="0"><text:p/></table:table-cell>
+              </table:table-row>
+            </table:table>
+          </office:spreadsheet></office:body>
+        </office:document-content>"##;
+        let found = read(&package("hidden-zero.ods", &[("content.xml", content)]));
+
+        assert_eq!(
+            render_at(&found, "T", 0, 0, Cell::Float(0.0)).as_deref(),
+            Some(""),
+            "an empty zero section must leave the zero blank"
+        );
+        assert_eq!(
+            render_at(&found, "T", 0, 0, Cell::Float(12.0)).as_deref(),
+            Some("12"),
+            "other values still use the positive section"
         );
     }
 

@@ -40,7 +40,7 @@ impl NumberFormat {
         if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("general") || trimmed == "@" {
             return None;
         }
-        let parsed = Parsed::parse(trimmed).ok()?;
+        let parsed = Parsed::parse(&with_empty_sections_made_explicit(trimmed)).ok()?;
         Some(Arc::new(Self {
             code: trimmed.to_string(),
             parsed,
@@ -126,6 +126,67 @@ impl NumberFormat {
             Cell::Empty | Cell::Bool(_) | Cell::Error(_) => None,
         }
     }
+}
+
+/// Excel's empty sections, made explicit.
+///
+/// A section with nothing in it means "show nothing" — `#,##0;-#,##0;` hides
+/// zeros, `0;;;` hides negatives, zeros and text. The format parser reads an
+/// empty section as General and prints the value anyway, so each empty section
+/// is written as `""` (an empty literal) before parsing. That renders as
+/// nothing, and keeps the section count that decides where the next section
+/// starts.
+///
+/// Only a section that holds no tokens at all is empty: `[Red]` and `_x` are
+/// content, and a quoted `";"` or an escaped one does not split a section.
+fn with_empty_sections_made_explicit(code: &str) -> String {
+    let mut sections: Vec<String> = vec![String::new()];
+    let mut in_quotes = false;
+    let mut in_bracket = false;
+    let mut escaped = false;
+
+    for ch in code.chars() {
+        let section = sections
+            .last_mut()
+            .expect("the list starts with one section");
+        if escaped {
+            escaped = false;
+            section.push(ch);
+            continue;
+        }
+        match ch {
+            '\\' => {
+                escaped = true;
+                section.push(ch);
+            }
+            '"' if !in_bracket => {
+                in_quotes = !in_quotes;
+                section.push(ch);
+            }
+            '[' if !in_quotes => {
+                in_bracket = true;
+                section.push(ch);
+            }
+            ']' if !in_quotes => {
+                in_bracket = false;
+                section.push(ch);
+            }
+            ';' if !in_quotes && !in_bracket => sections.push(String::new()),
+            _ => section.push(ch),
+        }
+    }
+
+    sections
+        .iter()
+        .map(|section| {
+            if section.is_empty() {
+                "\"\""
+            } else {
+                section.as_str()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(";")
 }
 
 /// The serial number a date occupies on the workbook's own calendar.
@@ -240,6 +301,47 @@ mod tests {
         );
         // Text under a numeric format is left alone, as in the sheet.
         assert_eq!(rendered("0.00", Cell::Text("n/a".into())), "n/a");
+    }
+
+    #[test]
+    fn an_empty_section_shows_nothing() {
+        // `#,##0;-#,##0;` is how a format hides zeros, and `;;;` hides
+        // everything. Both are sections with nothing between the separators.
+        assert_eq!(rendered("#,##0;-#,##0;", Cell::Float(0.0)), "");
+        assert_eq!(rendered("#,##0;-#,##0;", Cell::Float(1234.0)), "1,234");
+        assert_eq!(rendered("#,##0;-#,##0;", Cell::Float(-1234.0)), "-1,234");
+        assert_eq!(rendered(";;;", Cell::Float(12.0)), "");
+        assert_eq!(rendered(";;;", Cell::Float(-2.5)), "");
+        assert_eq!(rendered(";;;", Cell::Float(0.0)), "");
+        assert_eq!(rendered(";;;", Cell::Text("x".into())), "");
+        // An empty negative section hides negatives without touching zero.
+        assert_eq!(rendered("0;", Cell::Float(-3.0)), "");
+        assert_eq!(rendered("0;", Cell::Float(0.0)), "0");
+    }
+
+    #[test]
+    fn only_a_truly_empty_section_is_replaced() {
+        // A quoted space is content, and so is a colour token or a filler.
+        assert_eq!(rendered("0;0;\" \"", Cell::Float(0.0)), " ");
+        assert_eq!(rendered("0;0;_x", Cell::Float(0.0)), " ");
+        assert_eq!(rendered("[Red]0;0;0", Cell::Float(1.0)), "1");
+        // A semicolon inside a quoted literal does not split the code.
+        assert_eq!(rendered("0;0;\"a;b\"", Cell::Float(0.0)), "a;b");
+    }
+
+    #[test]
+    fn the_fourth_section_formats_text() {
+        assert_eq!(
+            rendered(r#"0.00;[Red]-0.00;0.00;"T: "@"#, Cell::Text("12".into())),
+            "T: 12"
+        );
+        // A text section with no placeholder shows the literal for any text.
+        assert_eq!(
+            rendered(r#"0;0;0;"n/a""#, Cell::Text("anything".into())),
+            "n/a"
+        );
+        // And an empty one hides text, which `0;;;` is.
+        assert_eq!(rendered("0;0;0;", Cell::Text("x".into())), "");
     }
 
     #[test]

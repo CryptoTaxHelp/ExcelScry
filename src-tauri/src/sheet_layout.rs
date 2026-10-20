@@ -91,6 +91,25 @@ fn count_attr(element: &BytesStart, name: &[u8], default: usize) -> usize {
         .unwrap_or(default)
 }
 
+/// Whether an OOXML flag attribute says yes. Excel writes `1`, but `true` is a
+/// valid spelling of the same thing.
+fn is_true(element: &BytesStart, name: &[u8]) -> bool {
+    matches!(
+        attr(element, name).as_deref().map(str::trim),
+        Some("1") | Some("true") | Some("TRUE")
+    )
+}
+
+/// Whether an ODF element is hidden. `collapse` is what LibreOffice writes for
+/// a hidden column or row; `filter` hides it only while filtering, so it stays
+/// visible here, and `visible` is the default.
+fn is_collapsed(element: &BytesStart) -> bool {
+    matches!(
+        attr(element, b"visibility").as_deref().map(str::trim),
+        Some("collapse")
+    )
+}
+
 // ---------------------------------------------------------------------------
 // OOXML
 // ---------------------------------------------------------------------------
@@ -246,10 +265,14 @@ fn read_xlsx_sheet<R: std::io::BufRead>(reader: R, layout: &mut SheetLayout) {
                     }
                     b"col" => {
                         let min = count_attr(&element, b"min", 0);
-                        let max = count_attr(&element, b"max", min);
-                        if let Some(width) = number_attr(&element, b"width").and_then(column_px) {
-                            let last = max.min(MAX_COLS);
-                            for col in min.max(1)..=last {
+                        let last = count_attr(&element, b"max", min).min(MAX_COLS);
+                        let hidden = is_true(&element, b"hidden");
+                        let width = number_attr(&element, b"width").and_then(column_px);
+                        for col in min.max(1)..=last {
+                            if hidden {
+                                layout.hidden_cols.insert(col - 1);
+                            }
+                            if let Some(width) = width {
                                 layout.col_widths.insert(col - 1, width);
                             }
                         }
@@ -259,6 +282,9 @@ fn read_xlsx_sheet<R: std::io::BufRead>(reader: R, layout: &mut SheetLayout) {
                             if number < MAX_ROWS {
                                 row = number;
                             }
+                        }
+                        if is_true(&element, b"hidden") {
+                            layout.hidden_rows.insert(row);
                         }
                         if let Some(height) = number_attr(&element, b"ht").and_then(row_px) {
                             layout.row_heights.insert(row, height);
@@ -606,10 +632,16 @@ impl Content {
                 let width = attr(element, b"style-name")
                     .and_then(|style| self.columns.get(&style).copied())
                     .or(self.default_col);
-                if let Some(width) = width {
+                let hidden = is_collapsed(element);
+                if width.is_some() || hidden {
                     if let Some((_, layout)) = self.table.as_mut() {
                         for col in self.col..(self.col + repeat).min(MAX_COLS) {
-                            layout.col_widths.insert(col, width);
+                            if let Some(width) = width {
+                                layout.col_widths.insert(col, width);
+                            }
+                            if hidden {
+                                layout.hidden_cols.insert(col);
+                            }
                         }
                     }
                 }
@@ -618,12 +650,18 @@ impl Content {
             b"table-row" if self.table.is_some() => {
                 self.col = 0;
                 let repeat = count_attr(element, b"number-rows-repeated", 1).clamp(1, MAX_ROWS);
-                if let Some(height) =
-                    attr(element, b"style-name").and_then(|style| self.rows.get(&style).copied())
-                {
+                let height =
+                    attr(element, b"style-name").and_then(|style| self.rows.get(&style).copied());
+                let hidden = is_collapsed(element);
+                if height.is_some() || hidden {
                     if let Some((_, layout)) = self.table.as_mut() {
                         for row in self.row..(self.row + repeat).min(MAX_ROWS) {
-                            layout.row_heights.insert(row, height);
+                            if let Some(height) = height {
+                                layout.row_heights.insert(row, height);
+                            }
+                            if hidden {
+                                layout.hidden_rows.insert(row);
+                            }
                         }
                     }
                 }
@@ -772,6 +810,8 @@ fn is_empty(layout: &SheetLayout) -> bool {
         && layout.default_col_width.is_none()
         && layout.default_row_height.is_none()
         && layout.merges.is_empty()
+        && layout.hidden_rows.is_empty()
+        && layout.hidden_cols.is_empty()
         && layout.frozen_rows == 0
         && layout.frozen_cols == 0
 }
@@ -882,10 +922,12 @@ mod tests {
   <sheetFormatPr defaultColWidth="10.5" defaultRowHeight="18"/>
   <cols>
     <col min="1" max="1" width="24" customWidth="1"/>
+    <col min="2" max="2" hidden="1"/>
     <col min="3" max="4" width="12.5" customWidth="1"/>
   </cols>
   <sheetData>
     <row r="2" ht="30" customHeight="1"><c r="A2"><v>1</v></c></row>
+    <row r="3" hidden="1"><c r="A3"><v>2</v></c></row>
   </sheetData>
   <mergeCells count="1"><mergeCell ref="B2:D3"/></mergeCells>
 </worksheet>"#;
@@ -903,6 +945,9 @@ mod tests {
         // A row's `r` is 1-based; the height belongs to the second row.
         assert_eq!(sheet.row_heights.get(&1), Some(&40.0));
         assert_eq!(sheet.row_heights.get(&0), None);
+        // A hidden column has no width of its own; it is still hidden.
+        assert_eq!(sheet.hidden_cols.iter().copied().collect::<Vec<_>>(), [1]);
+        assert_eq!(sheet.hidden_rows.iter().copied().collect::<Vec<_>>(), [2]);
         assert_eq!(sheet.frozen_rows, 2);
         assert_eq!(sheet.frozen_cols, 1);
         assert_eq!(
@@ -948,7 +993,7 @@ mod tests {
   <office:body><office:spreadsheet>
     <table:table table:name="Spans">
       <table:table-column table:style-name="co1"/>
-      <table:table-column table:number-columns-repeated="2"/>
+      <table:table-column table:number-columns-repeated="2" table:visibility="collapse"/>
       <table:table-row>
         <table:table-cell table:number-columns-spanned="2" table:number-rows-spanned="2" office:value-type="string"><text:p>x</text:p></table:table-cell>
         <table:covered-table-cell/>
@@ -956,7 +1001,7 @@ mod tests {
       <table:table-row table:style-name="ro1">
         <table:covered-table-cell/>
       </table:table-row>
-      <table:table-row/>
+      <table:table-row table:visibility="collapse"/>
     </table:table>
   </office:spreadsheet></office:body>
 </office:document-content>"#;
@@ -995,6 +1040,12 @@ mod tests {
         // 0.8 cm, on the second row only.
         assert_eq!(sheet.row_heights.get(&1), Some(&30.0));
         assert_eq!(sheet.row_heights.get(&0), None);
+        // The repeated hidden column hides every column it covers.
+        assert_eq!(
+            sheet.hidden_cols.iter().copied().collect::<Vec<_>>(),
+            [1, 2]
+        );
+        assert_eq!(sheet.hidden_rows.iter().copied().collect::<Vec<_>>(), [2]);
         assert_eq!(sheet.frozen_rows, 2);
         assert_eq!(sheet.frozen_cols, 1);
         assert_eq!(
@@ -1046,6 +1097,43 @@ mod tests {
         let sheet = layout.sheets.get("Frozen").expect("a freeze is layout");
         assert_eq!(sheet.frozen_rows, 3);
         assert_eq!(sheet.frozen_cols, 0);
+    }
+
+    #[test]
+    fn a_hidden_row_or_column_alone_counts_as_layout() {
+        // Hiding is geometry even when no size is given for the row or column:
+        // an empty hidden row has no height of its own.
+        let sheet = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+            <sheetData>
+              <row r="1"><c r="A1"><v>1</v></c></row>
+              <row r="2" hidden="1"/>
+            </sheetData>
+        </worksheet>"#;
+        let path = xlsx_package("hidden-row.xlsx", sheet);
+        let sheet = read(&path)
+            .sheets
+            .remove("Sized")
+            .expect("a hidden row is layout");
+        assert_eq!(sheet.hidden_rows.iter().copied().collect::<Vec<_>>(), [1]);
+
+        let content = r#"<?xml version="1.0" encoding="UTF-8"?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+    xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0"
+    xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0">
+  <office:body><office:spreadsheet>
+    <table:table table:name="Hidden">
+      <table:table-column table:visibility="collapse"/>
+      <table:table-row><table:table-cell office:value-type="string"><text:p>x</text:p></table:table-cell></table:table-row>
+    </table:table>
+  </office:spreadsheet></office:body>
+</office:document-content>"#;
+        let path = package("hidden-column.ods", &[("content.xml", content)]);
+        let sheet = read(&path)
+            .sheets
+            .remove("Hidden")
+            .expect("a hidden column is layout");
+        assert_eq!(sheet.hidden_cols.iter().copied().collect::<Vec<_>>(), [0]);
+        assert!(sheet.col_widths.is_empty(), "no width was given");
     }
 
     #[test]

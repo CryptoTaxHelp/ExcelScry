@@ -6,11 +6,13 @@
 
 use chrono::{Duration, NaiveDateTime, NaiveTime};
 use serde::Serialize;
-use std::collections::{BTreeMap, HashMap};
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use crate::number_format::NumberFormat;
 use crate::trust::TrustReport;
+use crate::view_prefs::ViewState;
 
 /// A single cell, preserving enough type information to export faithfully.
 #[derive(Debug, Clone, PartialEq)]
@@ -157,14 +159,25 @@ impl SheetFormats {
 /// Colours are `#RRGGBB`, upper-case, with any alpha dropped: ODF stores opaque
 /// colours and the grid has nothing to composite against. A cell with no entry
 /// in [`SheetLooks`] looks like plain text, so an unstyled sheet costs nothing.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CellLook {
+    // Only what the file actually sets is sent: a whole sheet of fills would
+    // otherwise carry two false flags per cell in every page of the grid.
+    #[serde(skip_serializing_if = "is_false")]
     pub bold: bool,
+    #[serde(skip_serializing_if = "is_false")]
     pub italic: bool,
     /// The text colour, when the file sets one.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
     /// The cell's fill, when the file sets one.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub background: Option<String>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl CellLook {
@@ -196,6 +209,19 @@ impl SheetLooks {
         self.cells.is_empty()
     }
 
+    /// The far corner of the styled region, as `(row, col)`. A fill can extend
+    /// a table past its last value, and the grid has to reach it to draw it.
+    pub fn extent(&self) -> Option<(usize, usize)> {
+        self.cells.keys().fold(None, |extent, key| {
+            let row = (key >> 32) as usize;
+            let col = (key & u32::MAX as u64) as usize;
+            Some(match extent {
+                Some((last_row, last_col)) => (last_row.max(row), last_col.max(col)),
+                None => (row, col),
+            })
+        })
+    }
+
     /// Every styled position, including ones with no value: a filled blank
     /// cell is part of how a table looks.
     pub fn iter(&self) -> impl Iterator<Item = (usize, usize, &CellLook)> {
@@ -204,6 +230,43 @@ impl SheetLooks {
                 (key >> 32) as usize,
                 (key & u32::MAX as u64) as usize,
                 look.as_ref(),
+            )
+        })
+    }
+}
+
+/// The formulas the file gives its cells, keyed by absolute position.
+///
+/// Sparse like [`SheetFormats`]: a report is mostly values, and the formulas
+/// matter only when the workbook is written back out. The text is kept exactly
+/// as the reader returned it — A1-style for an Excel package, already
+/// OpenFormula for an ODS — because translating it belongs to the export, which
+/// can leave a cell value-only when a formula cannot be expressed faithfully.
+#[derive(Debug, Clone, Default)]
+pub struct SheetFormulas {
+    cells: HashMap<u64, String>,
+}
+
+impl SheetFormulas {
+    pub fn insert(&mut self, row: usize, col: usize, formula: impl Into<String>) {
+        self.cells.insert(cell_key(row, col), formula.into());
+    }
+
+    /// The formula the file gives one cell, as the reader returned it.
+    pub fn get(&self, row: usize, col: usize) -> Option<&str> {
+        self.cells.get(&cell_key(row, col)).map(String::as_str)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.cells.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (usize, usize, &str)> {
+        self.cells.iter().map(|(key, formula)| {
+            (
+                (key >> 32) as usize,
+                (key & u32::MAX as u64) as usize,
+                formula.as_str(),
             )
         })
     }
@@ -220,7 +283,8 @@ pub struct MergeInfo {
 }
 
 /// The worksheet's own geometry: how wide its columns and tall its rows are,
-/// which cells it merges, and which rows and columns it freezes on screen.
+/// which of them it hides, which cells it merges, and which rows and columns it
+/// freezes on screen.
 ///
 /// Sizes are in CSS pixels, converted from whatever unit the package used, and
 /// sparse: a sheet that leaves every column at the default stores nothing, and
@@ -234,6 +298,14 @@ pub struct SheetLayout {
     pub default_col_width: Option<f64>,
     /// The workbook's default row height, when it differs from this app's.
     pub default_row_height: Option<f64>,
+    /// Columns the sheet hides, counted from column A.
+    ///
+    /// Positions rather than widths: a hidden column still has a width, and it
+    /// is the collapsed state — not a narrow measurement — that a file records
+    /// and that the export has to write back.
+    pub hidden_cols: BTreeSet<usize>,
+    /// Rows the sheet hides, counted from row 1.
+    pub hidden_rows: BTreeSet<usize>,
     pub merges: Vec<MergeInfo>,
     /// Columns pinned at the left, counted from column A. Zero means none.
     pub frozen_cols: usize,
@@ -257,6 +329,8 @@ pub struct SheetData {
     /// Column widths, row heights, merged regions and frozen panes, as the
     /// file has them.
     pub layout: SheetLayout,
+    /// What each calculated cell was computed from, when the file says.
+    pub formulas: SheetFormulas,
 }
 
 impl SheetData {
@@ -277,6 +351,89 @@ impl SheetData {
             .iter()
             .position(|r| r.iter().any(|c| !c.is_empty()))
     }
+
+    /// Sort the records of a delimited table by one column, from `first` on.
+    ///
+    /// A record is a row, so its other fields travel with it: sorting by
+    /// `Units` keeps each product beside its own figure. Everything before
+    /// `first` stays put — a table's title, its note, its header — and the
+    /// comparison is on the text, since a delimited file has no types.
+    ///
+    /// Records are moved, not copied, and each field is rendered once to sort
+    /// on, so a large file pays one string per record rather than one per
+    /// comparison.
+    pub fn sort_records(&mut self, first: usize, column: usize, descending: bool) {
+        if first >= self.rows.len() || column >= self.cols {
+            return;
+        }
+        let mut keyed: Vec<(String, bool, Vec<Cell>)> = self
+            .rows
+            .split_off(first)
+            .into_iter()
+            .map(|row| {
+                let key = row.get(column).map(Cell::display).unwrap_or_default();
+                let blank = key.trim().is_empty();
+                (key, blank, row)
+            })
+            .collect();
+        keyed.sort_by(|a, b| order_fields(&a.0, a.1, &b.0, b.1, descending));
+        self.rows.extend(keyed.into_iter().map(|(_, _, row)| row));
+    }
+}
+
+/// Order two fields of a delimited table, with blanks last either way.
+///
+/// A spreadsheet sorts blanks to the end whichever direction it is asked for,
+/// and a viewer should not bury a record's missing value among its numbers by
+/// reversing the order.
+fn order_fields(a: &str, a_blank: bool, b: &str, b_blank: bool, descending: bool) -> Ordering {
+    match (a_blank, b_blank) {
+        (true, true) => Ordering::Equal,
+        (true, false) => Ordering::Greater,
+        (false, true) => Ordering::Less,
+        (false, false) => {
+            let order = compare_fields(a, b);
+            if descending {
+                order.reverse()
+            } else {
+                order
+            }
+        }
+    }
+}
+
+/// Compare two fields the way a person reading the table would.
+///
+/// Two numbers compare as numbers, so `9` comes before `10` rather than after
+/// it; everything else compares case-insensitively, with the exact text as the
+/// tie-break, so `Ada` and `ada` keep a stable order instead of swapping on
+/// every sort. A field that is a number and one that is not falls back to text.
+fn compare_fields(a: &str, b: &str) -> Ordering {
+    if let (Some(left), Some(right)) = (number_of(a), number_of(b)) {
+        return left.partial_cmp(&right).unwrap_or(Ordering::Equal);
+    }
+    let folded = a.to_lowercase().cmp(&b.to_lowercase());
+    if folded == Ordering::Equal {
+        a.cmp(b)
+    } else {
+        folded
+    }
+}
+
+/// A field as a number, when the whole of it is one.
+///
+/// A grouped figure (`1,234`) is left as text: the comma is the separator this
+/// file was read with, and guessing which comma is a thousands mark would sort
+/// some files by a number and others by a string.
+fn number_of(text: &str) -> Option<f64> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    trimmed
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
 }
 
 /// How a delimited text file was read.
@@ -298,6 +455,14 @@ pub struct TextInfo {
     /// True when bytes did not decode and replacement characters stand in for
     /// them, which is what a wrong encoding looks like in the grid.
     pub undecodable: bool,
+    /// The row pinned as the header when the file was last open, counted from
+    /// zero as the grid counts.
+    ///
+    /// Absent when nobody has chosen one and the first record pins as usual;
+    /// `null` when the file was deliberately left unpinned — a headerless file
+    /// should not come back with a header; a number for a row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header_row: Option<Option<usize>>,
 }
 
 /// A parsed workbook held in application state.
@@ -320,8 +485,30 @@ pub struct LoadedWorkbook {
     pub text: Option<TextInfo>,
 }
 
-/// One cell as sent over IPC: `[kind, display]`. `None` means empty.
-pub type CellView = (String, String);
+/// One cell as sent over IPC: `[kind, display, look?, hidden?, formula?]`.
+/// `None` means empty.
+///
+/// A cell with no style still carries a third, null element so the shape is
+/// uniform; a styled blank is `["z", "", look]` and is drawn, because a fill
+/// on an empty cell is part of how the table looks.
+///
+/// The fourth element is the value the cell holds but its format does not show
+/// — a zero under `#,##0;-#,##0;`, anything under `;;;` — and is null for every
+/// cell the format leaves visible. The grid draws those cells with a mark and
+/// the readout names what is behind the blank, so a hidden number is not
+/// mistaken for an empty cell.
+///
+/// The fifth is the formula the file stores beside that value, in whatever
+/// syntax it was written in, or null for a cell that holds only a value. The
+/// grid marks those cells and shows the formula in the readout, so a calculated
+/// total can be told from a typed-in number.
+pub type CellView = (
+    String,
+    String,
+    Option<CellLook>,
+    Option<String>,
+    Option<String>,
+);
 
 /// A window of rows returned to the UI.
 #[derive(Debug, Serialize)]
@@ -356,10 +543,36 @@ pub struct SheetInfo {
     pub default_col_width: Option<f64>,
     pub default_row_height: Option<f64>,
     pub merges: Vec<MergeInfo>,
+    /// Columns the sheet hides as inclusive `[first, last]` runs, from column A.
+    ///
+    /// The grid collapses them as the sheet does, so a report whose detail
+    /// columns are hidden reads the way its author meant it; the UI offers to
+    /// show them again, which is why the positions travel rather than a flag.
+    /// Runs rather than positions keep a sheet that hides the rest of its
+    /// million rows to a single pair.
+    pub hidden_col_runs: Vec<(usize, usize)>,
+    /// Rows the sheet hides as inclusive `[first, last]` runs, from row 1.
+    pub hidden_row_runs: Vec<(usize, usize)>,
     /// Columns the sheet freezes at the left, zero when it freezes none.
     pub frozen_cols: usize,
     /// Rows the sheet freezes at the top, zero when it freezes none.
     pub frozen_rows: usize,
+}
+
+/// A sorted set of positions as inclusive `(first, last)` runs.
+///
+/// A hidden axis reaches the UI this way: the grid collapses a run, draws one
+/// seam where it was, and can hand the whole run back at once, so the pair is
+/// both smaller on the wire and closer to what is drawn.
+fn runs_of(positions: &BTreeSet<usize>) -> Vec<(usize, usize)> {
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    for &position in positions {
+        match runs.last_mut() {
+            Some((_, last)) if *last + 1 == position => *last = position,
+            _ => runs.push((position, position)),
+        }
+    }
+    runs
 }
 
 /// The workbook description returned when a file is opened.
@@ -378,6 +591,12 @@ pub struct WorkbookInfo {
     /// Set for `.csv`/`.tsv`, absent for every other format. The UI offers a
     /// delimiter and encoding picker when it is there.
     pub text: Option<TextInfo>,
+    /// Where the grid was left in this file, when it has been open before.
+    ///
+    /// Filled in by the command that opens a file, not here: the store lives
+    /// in the per-user data directory, which a workbook has no business
+    /// knowing about.
+    pub view: Option<ViewState>,
 }
 
 impl LoadedWorkbook {
@@ -415,6 +634,8 @@ impl LoadedWorkbook {
                     default_col_width: s.layout.default_col_width,
                     default_row_height: s.layout.default_row_height,
                     merges: s.layout.merges.clone(),
+                    hidden_col_runs: runs_of(&s.layout.hidden_cols),
+                    hidden_row_runs: runs_of(&s.layout.hidden_rows),
                     frozen_cols: s.layout.frozen_cols,
                     frozen_rows: s.layout.frozen_rows,
                 })
@@ -424,7 +645,38 @@ impl LoadedWorkbook {
             used_cells: self.used_cells,
             trust: self.trust.clone(),
             text: self.text.clone(),
+            view: None,
         }
+    }
+
+    /// Sort a delimited table's records by one column, below its header row.
+    ///
+    /// Only a delimited file can be sorted: a workbook's rows are its layout,
+    /// not a list of records, and reordering them would be an edit. `first` is
+    /// the row after the header — or the top of the file when nothing is
+    /// pinned — and everything above it is left where it is, so a title and a
+    /// note keep their places.
+    pub fn sort_text(
+        &mut self,
+        sheet: usize,
+        header_row: Option<usize>,
+        column: usize,
+        descending: bool,
+    ) -> Result<(), String> {
+        if self.text.is_none() {
+            return Err("Only a delimited text file can be sorted.".to_string());
+        }
+        let first = header_row.map_or(0, |row| row + 1);
+        let rows = self.sheets.get(sheet).map_or(0, |data| data.rows.len());
+        if first > rows {
+            return Err("That header row is past the end of the file.".to_string());
+        }
+        let data = self
+            .sheets
+            .get_mut(sheet)
+            .ok_or_else(|| "That worksheet no longer exists.".to_string())?;
+        data.sort_records(first, column, descending);
+        Ok(())
     }
 
     /// Extract a rectangular window of cells for the UI.
@@ -448,18 +700,38 @@ impl LoadedWorkbook {
             let mut out = Vec::with_capacity(col_end.saturating_sub(col_start));
             for c in col_start..col_end {
                 let cell = sd.cell(r, c);
-                if cell.is_empty() {
+                let look = sd.looks.get(r, c);
+                let formula = sd.formulas.get(r, c);
+                // A cell with nothing cached but a formula beside it is still a
+                // cell: the grid marks it, so dropping it would lose the fact
+                // that the file calculates it.
+                if cell.is_empty() && look.is_none() && formula.is_none() {
                     out.push(None);
                 } else {
                     // The sheet's own format decides the text; a format that
                     // refuses the value (a 17-digit integer, a boolean) falls
                     // back to the plain rendering rather than to nothing.
-                    let text = sd
-                        .formats
-                        .get(r, c)
-                        .and_then(|f| f.render(cell))
-                        .unwrap_or_else(|| cell.display());
-                    out.push(Some((cell.kind().to_string(), text)));
+                    let text = if cell.is_empty() {
+                        String::new()
+                    } else {
+                        sd.formats
+                            .get(r, c)
+                            .and_then(|f| f.render(cell))
+                            .unwrap_or_else(|| cell.display())
+                    };
+                    // A format that renders nothing hides whatever the cell
+                    // holds; the plain value rides along so the UI can say so.
+                    // An empty string is not hidden: there is nothing to hide.
+                    let hidden = (text.is_empty() && !cell.is_empty())
+                        .then(|| cell.display())
+                        .filter(|value| !value.is_empty());
+                    out.push(Some((
+                        cell.kind().to_string(),
+                        text,
+                        look.cloned(),
+                        hidden,
+                        formula.map(str::to_string),
+                    )));
                 }
             }
             rows.push(out);
@@ -482,6 +754,34 @@ impl LoadedWorkbook {
 mod tests {
     use super::*;
     use chrono::NaiveDate;
+
+    fn text_info(header_row: Option<Option<usize>>) -> TextInfo {
+        TextInfo {
+            delimiter: "comma".to_string(),
+            encoding: "UTF-8".to_string(),
+            delimiter_chosen: false,
+            encoding_chosen: false,
+            undecodable: false,
+            header_row,
+        }
+    }
+
+    #[test]
+    fn a_text_table_reports_its_header_row_as_absent_null_or_a_row() {
+        // The UI tells these three apart: absent pins the first record as it
+        // always did, null leaves the file unpinned, a number pins that row.
+        let json = serde_json::to_value(text_info(None)).unwrap();
+        assert!(
+            !json.as_object().unwrap().contains_key("headerRow"),
+            "nobody chose a header: the field is left out"
+        );
+
+        let json = serde_json::to_value(text_info(Some(None))).unwrap();
+        assert_eq!(json["headerRow"], serde_json::Value::Null);
+
+        let json = serde_json::to_value(text_info(Some(Some(2)))).unwrap();
+        assert_eq!(json["headerRow"], 2);
+    }
 
     #[test]
     fn integral_floats_render_without_decimal() {
@@ -557,6 +857,8 @@ mod tests {
         });
         layout.frozen_cols = 1;
         layout.frozen_rows = 2;
+        layout.hidden_cols = BTreeSet::from([1]);
+        layout.hidden_rows = BTreeSet::from([2, 3, 9]);
 
         let wb = LoadedWorkbook {
             path: "memory.xlsx".into(),
@@ -570,6 +872,7 @@ mod tests {
                 formats: SheetFormats::default(),
                 looks: SheetLooks::default(),
                 layout,
+                formulas: Default::default(),
             }],
             truncated: false,
             total_cells: 1,
@@ -591,6 +894,335 @@ mod tests {
         assert_eq!(sheet["merges"][0]["cols"], serde_json::json!(3));
         assert_eq!(sheet["frozenCols"], serde_json::json!(1));
         assert_eq!(sheet["frozenRows"], serde_json::json!(2));
+        // Hidden axes travel as runs: a collapsed run takes no space, and one
+        // pair can stand for a million hidden rows.
+        assert_eq!(sheet["hiddenColRuns"], serde_json::json!([[1, 1]]));
+        assert_eq!(sheet["hiddenRowRuns"], serde_json::json!([[2, 3], [9, 9]]));
+    }
+
+    #[test]
+    fn a_page_carries_cell_looks_and_styled_blanks() {
+        use crate::trust::{Trust, TrustReport};
+        use std::sync::Arc;
+
+        let mut looks = SheetLooks::default();
+        looks.insert(
+            0,
+            0,
+            Arc::new(CellLook {
+                bold: true,
+                color: Some("#1F4E79".into()),
+                ..CellLook::default()
+            }),
+        );
+        // A fill on a cell with no value still has to reach the grid.
+        looks.insert(
+            1,
+            1,
+            Arc::new(CellLook {
+                background: Some("#DDEEFF".into()),
+                ..CellLook::default()
+            }),
+        );
+
+        let wb = LoadedWorkbook {
+            path: "memory.xlsx".into(),
+            file_name: "memory.xlsx".into(),
+            format: "Excel Workbook (xlsx)".into(),
+            file_size: 0,
+            sheets: vec![SheetData {
+                name: "Styled".into(),
+                rows: vec![
+                    vec![Cell::Text("Region".into()), Cell::Text("Qty".into())],
+                    vec![Cell::Empty, Cell::Empty],
+                ],
+                cols: 2,
+                formats: SheetFormats::default(),
+                looks,
+                layout: SheetLayout::default(),
+                formulas: Default::default(),
+            }],
+            truncated: false,
+            total_cells: 4,
+            used_cells: 2,
+            trust: TrustReport::new(Trust::unknown()),
+            text: None,
+        };
+
+        let page = serde_json::to_value(wb.page(0, 0, 2, 0, 2).unwrap()).unwrap();
+        // The front end reads `[kind, text, look, hidden]`, and an unset part of
+        // a look is absent rather than false or null.
+        assert_eq!(
+            page["rows"][0][0],
+            serde_json::json!(["s", "Region", {"bold": true, "color": "#1F4E79"}, null, null])
+        );
+        assert_eq!(
+            page["rows"][0][1],
+            serde_json::json!(["s", "Qty", null, null, null])
+        );
+        // A styled blank is a cell; an unstyled one is still absence.
+        assert_eq!(
+            page["rows"][1][1],
+            serde_json::json!(["z", "", {"background": "#DDEEFF"}, null, null])
+        );
+        assert_eq!(page["rows"][1][0], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn hidden_axes_are_sent_as_runs() {
+        // Adjacent positions join a run and a gap starts a new one, so the
+        // grid gets the fewest pairs that describe what is hidden.
+        assert_eq!(
+            runs_of(&BTreeSet::from([4, 5, 6, 9, 11, 12])),
+            vec![(4, 6), (9, 9), (11, 12)]
+        );
+        assert_eq!(runs_of(&BTreeSet::new()), Vec::new());
+    }
+
+    #[test]
+    fn a_page_names_the_value_a_format_hides() {
+        use crate::trust::{Trust, TrustReport};
+        use ssfmt::DateSystem;
+
+        // `#,##0;-#,##0;` shows nothing for a zero, which the grid has to draw
+        // as a marked cell rather than as an empty one.
+        let hide_zero = NumberFormat::parse("#,##0;-#,##0;", DateSystem::Date1900).unwrap();
+        let mut formats = SheetFormats::default();
+        for col in 0..4 {
+            formats.insert(0, col, hide_zero.clone());
+        }
+
+        let wb = LoadedWorkbook {
+            path: "memory.xlsx".into(),
+            file_name: "memory.xlsx".into(),
+            format: "Excel Workbook (xlsx)".into(),
+            file_size: 0,
+            sheets: vec![SheetData {
+                name: "Hidden".into(),
+                rows: vec![vec![
+                    Cell::Float(0.0),
+                    Cell::Text(String::new()),
+                    Cell::Empty,
+                    Cell::Float(1234.0),
+                ]],
+                cols: 4,
+                formats,
+                looks: SheetLooks::default(),
+                layout: SheetLayout::default(),
+                formulas: Default::default(),
+            }],
+            truncated: false,
+            total_cells: 4,
+            used_cells: 3,
+            trust: TrustReport::new(Trust::unknown()),
+            text: None,
+        };
+
+        let page = serde_json::to_value(wb.page(0, 0, 1, 0, 4).unwrap()).unwrap();
+        // The hidden value rides along in the fourth slot, so the readout can
+        // name what the blank is hiding.
+        assert_eq!(
+            page["rows"][0][0],
+            serde_json::json!(["f", "", null, "0", null])
+        );
+        // An empty string holds nothing, so nothing is hidden; an empty cell is
+        // still absence; and a visible value is not marked.
+        assert_eq!(
+            page["rows"][0][1],
+            serde_json::json!(["s", "", null, null, null])
+        );
+        assert_eq!(page["rows"][0][2], serde_json::Value::Null);
+        assert_eq!(
+            page["rows"][0][3],
+            serde_json::json!(["f", "1,234", null, null, null])
+        );
+    }
+
+    /// A delimited table with the rows given, the way the reader builds one.
+    fn text_workbook(rows: &[&[&str]]) -> LoadedWorkbook {
+        use crate::trust::{Trust, TrustReport};
+
+        let rows: Vec<Vec<Cell>> = rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|field| Cell::Text((*field).into()))
+                    .collect()
+            })
+            .collect();
+        let cols = rows.iter().map(Vec::len).max().unwrap_or(0);
+        let used: usize = rows.iter().flatten().filter(|c| !c.is_empty()).count();
+        LoadedWorkbook {
+            path: "memory.csv".into(),
+            file_name: "memory.csv".into(),
+            format: "Delimited text (csv)".into(),
+            file_size: 0,
+            sheets: vec![SheetData {
+                name: "table".into(),
+                rows,
+                cols,
+                formats: SheetFormats::default(),
+                looks: SheetLooks::default(),
+                layout: SheetLayout::default(),
+                formulas: SheetFormulas::default(),
+            }],
+            truncated: false,
+            total_cells: used,
+            used_cells: used,
+            trust: TrustReport::new(Trust::unknown()),
+            text: Some(TextInfo {
+                delimiter: "comma".into(),
+                encoding: "UTF-8".into(),
+                delimiter_chosen: false,
+                encoding_chosen: false,
+                undecodable: false,
+                header_row: Some(Some(0)),
+            }),
+        }
+    }
+
+    fn field(book: &LoadedWorkbook, row: usize, col: usize) -> String {
+        book.sheets[0].cell(row, col).display()
+    }
+
+    #[test]
+    fn sorting_moves_whole_records_and_orders_numbers_as_numbers() {
+        let mut book = text_workbook(&[
+            &["Name", "Units"],
+            &["Beta", "10"],
+            &["alpha", "9"],
+            &["Gamma", "2"],
+        ]);
+
+        book.sort_text(0, Some(0), 1, false).expect("sort");
+        // A record is a row: the name travels with its own figure, and `9`
+        // comes before `10` rather than after it.
+        assert_eq!(field(&book, 0, 0), "Name", "the header stays put");
+        assert_eq!(field(&book, 1, 0), "Gamma");
+        assert_eq!(field(&book, 2, 0), "alpha");
+        assert_eq!(field(&book, 3, 0), "Beta");
+
+        // A second press reverses it, and the header is still the header.
+        book.sort_text(0, Some(0), 1, true).expect("sort");
+        assert_eq!(field(&book, 0, 0), "Name");
+        assert_eq!(field(&book, 1, 0), "Beta");
+        assert_eq!(field(&book, 3, 0), "Gamma");
+    }
+
+    #[test]
+    fn sorting_ignores_case_and_keeps_blanks_last_both_ways() {
+        let mut book = text_workbook(&[
+            &["Owner", "Note"],
+            &["beta", ""],
+            &["Alpha", "x"],
+            &["", "y"],
+            &["alpha", "z"],
+        ]);
+
+        // Case-insensitive, with the exact text breaking a tie so the order is
+        // stable: `Alpha` before `alpha`, then `beta`, then the blank owner.
+        book.sort_text(0, Some(0), 0, false).expect("ascending");
+        let names: Vec<String> = (1..4).map(|row| field(&book, row, 0)).collect();
+        assert_eq!(names, ["Alpha", "alpha", "beta"]);
+        assert_eq!(field(&book, 4, 0), "", "a blank sorts last");
+
+        book.sort_text(0, Some(0), 0, true).expect("descending");
+        assert_eq!(field(&book, 1, 0), "beta");
+        assert_eq!(field(&book, 2, 0), "alpha");
+        assert_eq!(field(&book, 3, 0), "Alpha");
+        assert_eq!(field(&book, 4, 0), "", "a blank still sorts last");
+    }
+
+    #[test]
+    fn sorting_starts_below_the_header_and_leaves_a_preamble_alone() {
+        let mut book = text_workbook(&[
+            &["Quarterly export, all regions"],
+            &["Generated by the warehouse system"],
+            &["Region", "Units"],
+            &["South", "3"],
+            &["North", "7"],
+        ]);
+
+        book.sort_text(0, Some(2), 1, false).expect("sort");
+        assert_eq!(field(&book, 0, 0), "Quarterly export, all regions");
+        assert_eq!(field(&book, 1, 0), "Generated by the warehouse system");
+        assert_eq!(field(&book, 2, 0), "Region");
+        assert_eq!(field(&book, 3, 0), "South", "3 before 7");
+        assert_eq!(field(&book, 4, 0), "North");
+    }
+
+    #[test]
+    fn a_workbook_is_never_sorted() {
+        let mut book = text_workbook(&[&["Name", "Units"], &["Beta", "10"]]);
+        book.text = None;
+        let refused = book.sort_text(0, Some(0), 1, false);
+        assert!(refused.is_err(), "a workbook's rows are its layout");
+        assert_eq!(field(&book, 1, 0), "Beta", "the refusal changed nothing");
+    }
+
+    #[test]
+    fn a_sorted_table_is_what_the_grid_is_handed() {
+        let mut book = text_workbook(&[&["Name", "Units"], &["Beta", "10"], &["alpha", "9"]]);
+        book.sort_text(0, Some(0), 1, false).expect("sort");
+
+        // The grid draws whatever window `page` hands it, so the order the sort
+        // produced has to be the order this returns: `9` is the first record,
+        // `10` the second, and the header is still the row above both.
+        let page = book.page(0, 1, 2, 0, 2).expect("page");
+        let first = page.rows[0][0].clone().expect("a record");
+        assert_eq!(first.1, "alpha");
+        let second = page.rows[1][0].clone().expect("a record");
+        assert_eq!(second.1, "Beta");
+        let head = book.page(0, 0, 1, 0, 1).expect("header");
+        assert_eq!(head.rows[0][0].clone().expect("a header").1, "Name");
+    }
+
+    #[test]
+    fn a_page_carries_the_formula_beside_its_value() {
+        use crate::trust::{Trust, TrustReport};
+
+        // A calculated cell is identifiable: the formula the file stores rides
+        // along with the value it produced, and a typed-in number has none.
+        let mut formulas = SheetFormulas::default();
+        formulas.insert(0, 1, "B1*2");
+        // A formula whose value the file did not cache is still a cell the
+        // grid has to mark, so it is not dropped as empty.
+        formulas.insert(0, 2, "A1+1");
+
+        let wb = LoadedWorkbook {
+            path: "memory.xlsx".into(),
+            file_name: "memory.xlsx".into(),
+            format: "Excel Workbook (xlsx)".into(),
+            file_size: 0,
+            sheets: vec![SheetData {
+                name: "Calc".into(),
+                rows: vec![vec![Cell::Int(4), Cell::Int(8), Cell::Empty]],
+                cols: 3,
+                formats: SheetFormats::default(),
+                looks: SheetLooks::default(),
+                layout: SheetLayout::default(),
+                formulas,
+            }],
+            truncated: false,
+            total_cells: 3,
+            used_cells: 2,
+            trust: TrustReport::new(Trust::unknown()),
+            text: None,
+        };
+
+        let page = serde_json::to_value(wb.page(0, 0, 1, 0, 3).unwrap()).unwrap();
+        assert_eq!(
+            page["rows"][0][0],
+            serde_json::json!(["i", "4", null, null, null])
+        );
+        assert_eq!(
+            page["rows"][0][1],
+            serde_json::json!(["i", "8", null, null, "B1*2"])
+        );
+        assert_eq!(
+            page["rows"][0][2],
+            serde_json::json!(["z", "", null, null, "A1+1"])
+        );
     }
 
     #[test]

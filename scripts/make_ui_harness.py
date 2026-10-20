@@ -38,8 +38,17 @@ function group(value) {
 function salesCell(r, c) {
   if (r === 5) {
     const h = ["Region", "Product", "Units", "Unit price", "Revenue", "Ordered", "Notes", "Margin", "Start time"][c - 2];
-    return h ? ["s", h] : null;
+    // A bold header with a fill, the way most reports style one.
+    return h
+      ? ["s", h, { bold: true, color: "#1F4E79", background: "#DCE6F1" }]
+      : null;
   }
+  // A fill on a cell with no value, which the grid has to draw anyway.
+  if (r === 3 && c === 1) return ["z", "", { background: "#FDE68A" }];
+  // A zero its number format hides (`#,##0;-#,##0;`): the cell is blank, so
+  // the grid marks it and the readout says what is behind the blank.
+  if (r === 7 && c === 6) return ["f", "", null, "0"];
+  if (r === 8 && c === 8) return ["s", "", null, "anything"];
   if (r >= 6 && r <= 25) {
     const regions = ["North", "South", "East", "West"];
     switch (c) {
@@ -47,9 +56,15 @@ function salesCell(r, c) {
       case 3: return ["s", r % 2 ? "Widget" : "Gadget"];
       case 4: return ["i", group(r * 137)];
       case 5: return ["f", "$19.99"];
-      case 6: return ["f", "$" + group((r * 137 * 19.99).toFixed(2))];
+      case 6:
+        // A calculated column: units times unit price, the shape a report's
+        // own formula takes, so the grid can mark it and the readout show it.
+        return ["f", "$" + group((r * 137 * 19.99).toFixed(2)), null, null, `D${r + 1}*E${r + 1}`];
       case 7: return ["d", `1${r % 10}/0${(r % 9) + 1}/2026`];
-      case 8: return r === 9 ? ["e", "#N/A upstream"] : ["s", "note " + r];
+      case 8:
+        return r === 9
+          ? ["e", "#N/A upstream"]
+          : ["s", "note " + r, { italic: true, color: "#6B7280" }];
       case 9: return ["f", `${(20 + (r % 30)).toFixed(1)}%`];
       case 10: return ["t", `0${r % 9 + 1}:3${r % 6}`];
       default: return null;
@@ -64,8 +79,12 @@ function salesCell(r, c) {
 }
 
 function wideCell(r, c) {
-  if (r === 0) return ["s", `col ${c + 1}`];
-  if (c === 0) return ["i", String(r)];
+  // The frozen row and column are styled too, so the pinned panes can be seen
+  // carrying the workbook's look rather than only their positions.
+  if (r === 0)
+    return ["s", `col ${c + 1}`, { bold: true, color: "#1F4E79", background: "#E2E8F0" }];
+  if (c === 0)
+    return ["i", String(r), { bold: true, background: "#F1F5F9" }];
   return ["i", String((r * c) % 997)];
 }
 
@@ -80,11 +99,19 @@ function tallCell(r, c) {
 function layoutCell(r, c) {
   if (r === 0) {
     // The banner is merged across A:D, so only its anchor holds anything.
-    return c === 0 ? ["s", "Quarterly totals — merged across four columns"] : null;
+    return c === 0
+      ? [
+          "s",
+          "Quarterly totals — merged across four columns",
+          { bold: true, color: "#FFFFFF", background: "#1F4E79" },
+        ]
+      : null;
   }
   if (r === 1) {
     const headers = ["Region", "Units", "Notes over two columns"];
-    return c <= 2 && headers[c] ? ["s", headers[c]] : null;
+    return c <= 2 && headers[c]
+      ? ["s", headers[c], { bold: true, background: "#E2E8F0" }]
+      : null;
   }
   if (r === 3 && c === 0) return ["s", "tall merged cell"];
   if (r === 10 && c === 1) return ["s", "block of six cells"];
@@ -131,6 +158,17 @@ const SHEETS = [
 // widths, three row heights and four merged regions. The rest keep the
 // workbook's own 64 x 20.
 const LAYOUTS = {
+  "Sales report": {
+    // A prepared report hides the column of order dates and three rows of
+    // detail, so the grid can be seen collapsing them and offering them back.
+    defaultColWidth: null,
+    defaultRowHeight: null,
+    colWidths: [],
+    rowHeights: [],
+    merges: [],
+    hiddenColRuns: [[7, 7]],
+    hiddenRowRuns: [[15, 17]],
+  },
   "Wide sheet": {
     // The header row and the index column are frozen: scrolling right keeps
     // the row labels, scrolling down keeps the column names.
@@ -203,7 +241,22 @@ const REPORT_TEXT =
     ),
   ].join("\n") + "\n";
 
-// A third delimited file, at `#legacy`: an export from a Windows tool, with
+// A delimited file at `#legacy-jp`: a Japanese export, which the Rust side now
+// recognises as Shift_JIS from the bytes. The rows arrive decoded here, so the
+// bar is what this mock is for: the line naming Shift_JIS with nobody having
+// chosen it, the picker still on Auto, and Shift_JIS offered in the list.
+const JP_TEXT =
+  [
+    "商品コード,商品名,単価,数量,備考",
+    ...Array.from(
+      { length: 40 },
+      (_, i) =>
+        `A-${1001 + i},商品${i + 1},${150 + i},${12 + i},` +
+        `青森県産の新鮮な果物を東京の倉庫へ`
+    ),
+  ].join("\n") + "\n";
+
+// A fourth delimited file, at `#legacy`: an export from a Windows tool, with
 // accented text a UTF-8 reader would not decode. The mock reports what the Rust
 // side now works out for such a file: Windows-1252, with nobody choosing it.
 const LEGACY_TEXT =
@@ -219,8 +272,30 @@ const LEGACY_TEXT =
 
 // The per-file choices, mirroring the Rust side's text-dialects.json: only
 // what a bar change made explicit is stored, and a first open or a reload
-// starts from it.
+// starts from it. The header row is a separate command, so it lives in the
+// same entry but does not depend on a dialect change.
 const REMEMBERED = new Map();
+
+// The position remembered for each file, mirroring views.json: the Rust side
+// keeps one per file and hands it back with the workbook, so reopening a file
+// can be seen landing where it was left.
+const VIEWS = new Map();
+
+// The text file that is open, so `remember_header` — which the real app answers
+// from its own state — knows which file the pin belongs to.
+let OPEN_PATH = "";
+
+// The welcome screen's recent list, mirroring recent-files.json. Newest first,
+// capped the same way, and every successful open goes to the front.
+let RECENT = ["/mock/ExcelScry-sample.xlsx", "/mock/ExcelScry-sample.csv"];
+
+function rememberRecent(path) {
+  const key = String(path);
+  RECENT = [
+    key,
+    ...RECENT.filter((entry) => entry.toLowerCase() !== key.toLowerCase()),
+  ].slice(0, 8);
+}
 
 // Opening a mock path ending in these names exercises each badge state.
 const TRUST_REPORTS = {
@@ -294,16 +369,26 @@ function trustFor(path) {
   return TRUST_REPORTS.xlsx;
 }
 
-const ENCODING_LABELS = {
-  "windows-1252": "Windows-1252",
-  "utf-16le": "UTF-16 LE",
-  "utf-16be": "UTF-16 BE",
-};
+// The bar's select is the list of names the Rust side can report, so the mock
+// reads them from it rather than keeping a copy that would go stale as
+// encodings are added.
+const ENCODING_LABELS = Object.fromEntries(
+  [...document.querySelectorAll("#text-encoding option")]
+    .filter((option) => option.value)
+    .map((option) => [option.value, option.textContent.trim()])
+);
 
 function textWorkbook(path, delimiter, encoding) {
   const name = String(path);
+  const japanese = name.includes("japanese");
   const legacy = name.includes("legacy");
-  const source = legacy ? LEGACY_TEXT : name.includes("report") ? REPORT_TEXT : CSV_TEXT;
+  const source = japanese
+    ? JP_TEXT
+    : legacy
+      ? LEGACY_TEXT
+      : name.includes("report")
+        ? REPORT_TEXT
+        : CSV_TEXT;
   const separator = DELIMITERS[delimiter] || ",";
   const rows = source.split("\n")
     .filter((line) => line.length > 0)
@@ -316,7 +401,12 @@ function textWorkbook(path, delimiter, encoding) {
     rows: rows.length,
     cols: Math.max(...rows.map((row) => row.length)),
     firstUsed: 0,
-    cell: (r, c) => (rows[r] && rows[r][c] !== undefined ? ["s", rows[r][c]] : null),
+    // The parsed records, so `sort_text_rows` can move them the way the Rust
+    // side moves its own: a record is a row, and its other fields travel with
+    // it.
+    data: rows,
+    cell: (r, c) =>
+      sheet.data[r] && sheet.data[r][c] !== undefined ? ["s", sheet.data[r][c]] : null,
   };
   OPENED = [sheet];
   return {
@@ -328,6 +418,7 @@ function textWorkbook(path, delimiter, encoding) {
     totalCells: 0,
     usedCells: rows.reduce((count, row) => count + row.length, 0),
     trust: TRUST_REPORTS.xlsx,
+    view: VIEWS.get(path),
     sheets: [
       { name: sheet.name, rows: sheet.rows, cols: sheet.cols, usedCells: 0, firstUsedRow: 0 },
     ],
@@ -335,20 +426,77 @@ function textWorkbook(path, delimiter, encoding) {
       delimiter: delimiter || "comma",
       // What the read settled on: the chosen encoding, or the one the bytes
       // were recognised as.
-      encoding: encoding ? ENCODING_LABELS[encoding] || "UTF-8" : legacy ? "Windows-1252" : "UTF-8",
+      encoding: encoding
+        ? ENCODING_LABELS[encoding] || "UTF-8"
+        : japanese
+          ? "Shift_JIS"
+          : legacy
+            ? "Windows-1252"
+            : "UTF-8",
       delimiterChosen: Boolean(delimiter),
       encodingChosen: Boolean(encoding),
       // A legacy file read as UTF-8 on purpose is the case that still needs
       // the hint; every automatic read of it succeeds.
-      undecodable: legacy && encoding === "utf-8",
+      undecodable: (legacy || japanese) && encoding === "utf-8",
+      // The row pinned the last time this file was open. Absent when nobody
+      // chose one, null when it was left unpinned, a number for a row — the
+      // three states the UI tells apart.
+      ...(mockStoredHeader(path) === undefined ? {} : { headerRow: mockStoredHeader(path) }),
     },
   };
+}
+
+// The mock's own helpers are prefixed: the app's script shares this global
+// scope, and a name it also defines would be shadowed by it.
+
+/** A field as a number, when the whole of it is one; `1,50` stays text. */
+function mockNumber(text) {
+  const trimmed = String(text).trim();
+  if (!trimmed) return null;
+  const value = Number(trimmed);
+  return Number.isFinite(value) ? value : null;
+}
+
+/** Two fields compared the way a person reading the table would. */
+function mockCompareFields(a, b) {
+  const left = mockNumber(a);
+  const right = mockNumber(b);
+  if (left !== null && right !== null) return left < right ? -1 : left > right ? 1 : 0;
+  const foldedA = a.toLowerCase();
+  const foldedB = b.toLowerCase();
+  if (foldedA !== foldedB) return foldedA < foldedB ? -1 : 1;
+  return a === b ? 0 : a < b ? -1 : 1;
+}
+
+/** Two records ordered, with blanks last whichever direction is asked for. */
+function mockOrderRecords(a, b, descending) {
+  if (a.blank && b.blank) return 0;
+  if (a.blank) return 1;
+  if (b.blank) return -1;
+  const order = mockCompareFields(a.key, b.key);
+  return descending ? -order : order;
+}
+
+/** The header row remembered for a path, if the store has an entry for it. */
+function mockStoredHeader(path) {
+  const entry = REMEMBERED.get(path);
+  return entry && "headerRow" in entry ? entry.headerRow : undefined;
+}
+
+/** Remember a header row, keeping the dialect stored beside it. */
+function mockRememberHeader(path, row) {
+  if (!path) return;
+  REMEMBERED.set(path, {
+    ...(REMEMBERED.get(path) || {}),
+    headerRow: row === undefined ? null : row,
+  });
 }
 
 function workbookInfo(path) {
   const name = String(path).split(/[\\/]/).pop();
   const trust = trustFor(path);
   OPENED = SHEETS;
+  OPEN_PATH = path;
   return {
     path,
     fileName: name,
@@ -358,6 +506,7 @@ function workbookInfo(path) {
     totalCells: 0,
     usedCells: 6423,
     trust,
+    view: VIEWS.get(path),
     sheets: SHEETS.map((s) => ({
       name: s.name,
       rows: s.rows,
@@ -369,6 +518,8 @@ function workbookInfo(path) {
       defaultColWidth: LAYOUTS[s.name] ? LAYOUTS[s.name].defaultColWidth : null,
       defaultRowHeight: LAYOUTS[s.name] ? LAYOUTS[s.name].defaultRowHeight : null,
       merges: LAYOUTS[s.name] ? LAYOUTS[s.name].merges : [],
+      hiddenColRuns: LAYOUTS[s.name] ? LAYOUTS[s.name].hiddenColRuns || [] : [],
+      hiddenRowRuns: LAYOUTS[s.name] ? LAYOUTS[s.name].hiddenRowRuns || [] : [],
       frozenCols: LAYOUTS[s.name] ? LAYOUTS[s.name].frozenCols || 0 : 0,
       frozenRows: LAYOUTS[s.name] ? LAYOUTS[s.name].frozenRows || 0 : 0,
     })),
@@ -379,17 +530,26 @@ const UPDATE_AVAILABLE = true;
 
 const HANDLERS = {
   initial_file: () => null,
+  recent_files: () =>
+    RECENT.map((path) => ({
+      path,
+      name: String(path).split(/[\\/]/).pop(),
+    })),
   // `#csv` opens the delimited sample instead, so the text bar can be seen;
-  // `#preamble` opens one whose header is not its first row.
+  // `#preamble` opens one whose header is not its first row; `#legacy` and
+  // `#legacy-jp` open files in encodings the bytes have to be read for.
   pick_workbook: () =>
     location.hash === "#preamble"
       ? "/mock/Exported-report.csv"
-      : location.hash === "#legacy"
-        ? "/mock/legacy-export.csv"
-        : location.hash === "#csv"
-          ? "/mock/ExcelScry-sample.csv"
-          : "/mock/ExcelScry-sample.xlsx",
+      : location.hash === "#legacy-jp"
+        ? "/mock/japanese-export.csv"
+        : location.hash === "#legacy"
+          ? "/mock/legacy-export.csv"
+          : location.hash === "#csv"
+            ? "/mock/ExcelScry-sample.csv"
+            : "/mock/ExcelScry-sample.xlsx",
   open_workbook: ({ path, delimiter, encoding, dialectExplicit }) => {
+    rememberRecent(path);
     const name = String(path).toLowerCase();
     if (!name.endsWith(".csv") && !name.endsWith(".tsv")) return workbookInfo(path);
     const remembered = REMEMBERED.get(path) || {};
@@ -399,13 +559,46 @@ const HANDLERS = {
     // chosen, so the bar's selects show it.
     const effectiveDelimiter = explicit ? delimiter || "" : delimiter || remembered.delimiter || "";
     const effectiveEncoding = explicit ? encoding || "" : encoding || remembered.encoding || "";
+    // The header row is chosen separately, so changing the dialect keeps it.
+    OPEN_PATH = path;
     if (explicit) {
-      if (!delimiter && !encoding) REMEMBERED.delete(path);
-      else REMEMBERED.set(path, { delimiter: delimiter || "", encoding: encoding || "" });
+      const entry = { ...remembered, delimiter: delimiter || "", encoding: encoding || "" };
+      if (!entry.delimiter && !entry.encoding && !("headerRow" in entry)) REMEMBERED.delete(path);
+      else REMEMBERED.set(path, entry);
     }
     return textWorkbook(path, effectiveDelimiter, effectiveEncoding);
   },
+  remember_header: ({ row }) => {
+    mockRememberHeader(OPEN_PATH, row === undefined ? null : row);
+    return null;
+  },
+  // Mirrors `view_prefs::remember`: the position belongs to the file that is
+  // open, and the next open of that file is handed it back.
+  remember_view: ({ sheet, row, col, top, left }) => {
+    if (OPEN_PATH) VIEWS.set(OPEN_PATH, { sheet, row, col, top, left });
+    return null;
+  },
+  // Mirrors `LoadedWorkbook::sort_text`: only a delimited file sorts, the
+  // records below the pinned header move as whole rows, and the preamble above
+  // it is left alone.
+  sort_text_rows: ({ sheet, headerRow, column, descending }) => {
+    const s = OPENED[sheet];
+    if (!s || !s.data) throw new Error("Only a delimited text file can be sorted.");
+    const first = headerRow === null || headerRow === undefined ? 0 : headerRow + 1;
+    if (first > s.data.length) throw new Error("That header row is past the end of the file.");
+    const records = s.data.slice(first).map((row) => {
+      const text = row[column] === undefined ? "" : String(row[column]);
+      return { row, key: text, blank: !text.trim() };
+    });
+    records.sort((a, b) => mockOrderRecords(a, b, Boolean(descending)));
+    s.data = s.data.slice(0, first).concat(records.map((record) => record.row));
+    return null;
+  },
   close_workbook: () => null,
+  save_utf8_copy: ({ destination }) => ({
+    path: destination || "/mock/legacy-export-utf8.csv",
+    bytes: 18432,
+  }),
   get_rows: ({ sheet, rowStart, rowCount, colStart, colCount }) => {
     const s = OPENED[sheet];
     const rEnd = Math.min(rowStart + rowCount, s.rows);

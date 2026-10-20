@@ -4,16 +4,20 @@
 
 mod associations;
 mod cell_styles;
+mod formula;
 mod manifest;
 mod model;
 mod number_format;
 mod ods_export;
 mod ods_formats;
+mod recent;
 mod sheet_layout;
+mod text_export;
 mod text_prefs;
 mod text_table;
 mod trust;
 mod update;
+mod view_prefs;
 mod workbook;
 
 use std::path::{Path, PathBuf};
@@ -25,6 +29,8 @@ use tauri_plugin_dialog::DialogExt;
 use associations::AssociationStatus;
 use model::{RowsPage, WorkbookInfo};
 use ods_export::ExportSummary;
+use text_export::Utf8CopySummary;
+use text_table::Encoding;
 
 /// Everything the UI can ask for, plus the currently open workbook.
 #[derive(Default)]
@@ -42,6 +48,20 @@ impl AppState {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let wb = guard.as_ref().ok_or("No spreadsheet is open.")?;
+        Ok(f(wb))
+    }
+
+    /// The same, for a command that changes the open workbook in place: a text
+    /// table's sort order is a view of the rows, not a re-read of the file.
+    fn with_workbook_mut<T>(
+        &self,
+        f: impl FnOnce(&mut model::LoadedWorkbook) -> T,
+    ) -> Result<T, String> {
+        let mut guard = self
+            .workbook
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let wb = guard.as_mut().ok_or("No spreadsheet is open.")?;
         Ok(f(wb))
     }
 }
@@ -68,10 +88,10 @@ async fn open_workbook(
 ) -> Result<WorkbookInfo, String> {
     let requested = text_table::Dialect::from_labels(delimiter.as_deref(), encoding.as_deref())?;
     // A file read with choices before starts from them; detection only fills in
-    // the parts nobody chose. A store that cannot be read simply remembers
-    // nothing.
-    let store = app.path().app_local_data_dir().ok();
-    let remembered = store
+    // the parts nobody chose. Without a data directory the stores simply
+    // remember nothing.
+    let data_dir = app.path().app_local_data_dir().ok();
+    let remembered = data_dir
         .as_deref()
         .map(|directory| text_prefs::lookup(directory, Path::new(&path)))
         .unwrap_or_default();
@@ -83,10 +103,17 @@ async fn open_workbook(
             .await
             .map_err(|e| format!("Could not read the file: {e}"))??;
 
+    // A successful open is what the welcome screen offers next time. This is
+    // separate from the dialect memory: a workbook has no dialect, and a text
+    // file opened with detection has no remembered choice either.
+    if let Some(directory) = data_dir.as_deref() {
+        recent::remember(directory, Path::new(&path));
+    }
+
     // Only a choice made in the bar is stored; the first open of a file and a
     // reload must not rewrite what the store already says.
     if explicit {
-        if let Some(directory) = store.as_deref() {
+        if let Some(directory) = data_dir.as_deref() {
             text_prefs::remember(
                 directory,
                 Path::new(&path),
@@ -95,12 +122,102 @@ async fn open_workbook(
         }
     }
 
-    let info = loaded.info();
+    let mut info = loaded.info();
+    // A delimited file reopens with the row that was pinned for it last time:
+    // the rows above the header do not need finding again. The choice is a view
+    // of the file, not a way to read it, so it is applied after the parse.
+    if let Some(text) = info.text.as_mut() {
+        let rows = info.sheets.first().map_or(0, |sheet| sheet.rows);
+        text.header_row = stored_header_row(&remembered, rows);
+    }
+    // And it reopens where it was left: the sheet, the cell and the scroll
+    // offset, when the store still has them for this exact file.
+    let extents: Vec<(usize, usize)> = info
+        .sheets
+        .iter()
+        .map(|sheet| (sheet.rows, sheet.cols))
+        .collect();
+    info.view = data_dir
+        .as_deref()
+        .and_then(|directory| view_prefs::lookup(directory, Path::new(&path)))
+        .and_then(|stored| fit_view(stored, &extents));
     *state
         .workbook
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(loaded);
     Ok(info)
+}
+
+/// Where the grid was left, fitted to the workbook that was just opened.
+///
+/// The store is trusted only as far as the file it was written for: the sheet
+/// has to still be there, and a cell past the end of a sheet that turned out
+/// shorter is pulled back to its last row or column rather than left pointing
+/// at nothing. An offset that is not a number is not a position either.
+fn fit_view(
+    view: view_prefs::ViewState,
+    sheets: &[(usize, usize)],
+) -> Option<view_prefs::ViewState> {
+    let &(rows, cols) = sheets.get(view.sheet)?;
+    Some(view_prefs::ViewState {
+        sheet: view.sheet,
+        row: view.row.min(last_index(rows)),
+        col: view.col.min(last_index(cols)),
+        top: if view.top.is_finite() {
+            view.top.max(0.0)
+        } else {
+            0.0
+        },
+        left: if view.left.is_finite() {
+            view.left.max(0.0)
+        } else {
+            0.0
+        },
+    })
+}
+
+/// The last index of an axis `count` long, as the grid numbers it.
+fn last_index(count: usize) -> u32 {
+    u32::try_from(count.saturating_sub(1)).unwrap_or(u32::MAX)
+}
+
+/// The header row a stored choice names, as the UI reads it.
+///
+/// `None` means nobody chose one (the first record pins, as always),
+/// `Some(None)` that the file was left unpinned, and `Some(Some(row))` a row.
+/// A row the file no longer has is dropped rather than pinned past the end.
+fn stored_header_row(entry: &text_prefs::Entry, rows: usize) -> Option<Option<usize>> {
+    match entry.header_row {
+        Some(Some(row)) if row >= rows => None,
+        stored => stored,
+    }
+}
+
+/// Remember the row pinned as the open delimited file's header.
+///
+/// The bar calls this whenever the pin changes, including when the file is
+/// unpinned — which is itself a choice, and one that reopening should keep. A
+/// pin that cannot be written still applies to this session; the store is a
+/// convenience, never something an open depends on.
+#[tauri::command]
+fn remember_header(row: Option<u32>, app: tauri::AppHandle, state: State<'_, AppState>) {
+    let Ok(directory) = app.path().app_local_data_dir() else {
+        return;
+    };
+    let opened = state.with_workbook(|wb| {
+        (
+            wb.text.is_some(),
+            wb.path.clone(),
+            wb.sheets.first().map_or(0, |sheet| sheet.rows.len()),
+        )
+    });
+    let Ok((true, path, rows)) = opened else {
+        return;
+    };
+    // Only a row the file has can be its header; anything else is the pin
+    // coming off.
+    let header = row.map(|row| row as usize).filter(|row| *row < rows);
+    text_prefs::remember_header(&directory, Path::new(&path), header);
 }
 
 /// Show the native file picker and open whatever is chosen.
@@ -127,6 +244,15 @@ async fn pick_workbook(app: tauri::AppHandle) -> Result<Option<String>, String> 
             .map(|p| Some(p.display().to_string()))
             .map_err(|e| format!("Could not use the selected file: {e}")),
     }
+}
+
+/// The files the welcome screen should offer, newest first.
+#[tauri::command]
+fn recent_files(app: tauri::AppHandle) -> Vec<recent::RecentFile> {
+    app.path()
+        .app_local_data_dir()
+        .map(|directory| recent::list(&directory))
+        .unwrap_or_default()
 }
 
 /// The file Windows launched us with, e.g. from "Scry Excel File".
@@ -166,6 +292,67 @@ fn get_rows(
         .ok_or_else(|| "That worksheet no longer exists.".to_string())
 }
 
+/// Remember where the open file was left.
+///
+/// The grid calls this as the selection, the sheet or the scroll offset
+/// changes, so the next open of the same file starts there. What arrives from
+/// the webview is fitted to the sheet it names rather than trusted: a position
+/// past the end of the sheet is not one, and neither is a scroll offset that is
+/// not a number.
+#[tauri::command]
+fn remember_view(
+    sheet: usize,
+    row: u32,
+    col: u32,
+    top: f64,
+    left: f64,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) {
+    let Ok(directory) = app.path().app_local_data_dir() else {
+        return;
+    };
+    let Ok((path, extents)) = state.with_workbook(|wb| {
+        (
+            wb.path.clone(),
+            wb.sheets
+                .iter()
+                .map(|sheet| (sheet.row_count(), sheet.cols))
+                .collect::<Vec<_>>(),
+        )
+    }) else {
+        return;
+    };
+    let requested = view_prefs::ViewState {
+        sheet,
+        row,
+        col,
+        top,
+        left,
+    };
+    // A view of a sheet that is not there is not this workbook's view.
+    let Some(view) = fit_view(requested, &extents) else {
+        return;
+    };
+    view_prefs::remember(&directory, Path::new(&path), view);
+}
+
+/// Sort a delimited file's records by one of its named columns.
+///
+/// `headerRow` is the row the grid has pinned, so the records start below it
+/// and a title or note above it is left alone. The file on disk is never
+/// touched: this orders the rows in memory, and a reload reads them back.
+#[tauri::command]
+fn sort_text_rows(
+    sheet: usize,
+    header_row: Option<usize>,
+    column: usize,
+    descending: bool,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.with_workbook_mut(|wb| wb.sort_text(sheet, header_row, column, descending))?
+}
+
 /// Write the open workbook out as OpenDocument (.ods).
 #[tauri::command]
 async fn export_ods(
@@ -203,6 +390,68 @@ async fn export_ods(
     tauri::async_runtime::spawn_blocking(move || ods_export::export(&workbook, &target))
         .await
         .map_err(|e| format!("Export failed: {e}"))?
+}
+
+/// Write a UTF-8 copy of a delimited file that was read in another encoding.
+#[tauri::command]
+async fn save_utf8_copy(
+    destination: Option<String>,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Utf8CopySummary, String> {
+    let (source, encoding, suggested) = state.with_workbook(|wb| {
+        let text = wb
+            .text
+            .as_ref()
+            .ok_or_else(|| "Only a delimited text file can be saved as UTF-8.".to_string())?;
+        let encoding = Encoding::from_label(&text.encoding)
+            .ok_or_else(|| format!("Unknown encoding {:?}.", text.encoding))?;
+        if encoding == Encoding::Utf8 {
+            return Err("This file was already read as UTF-8.".to_string());
+        }
+        Ok::<_, String>((
+            PathBuf::from(&wb.path),
+            encoding,
+            utf8_copy_name(&wb.file_name),
+        ))
+    })??;
+
+    let target = match destination {
+        Some(path) if !path.trim().is_empty() => PathBuf::from(path),
+        _ => {
+            let picked = app
+                .dialog()
+                .file()
+                .set_title("Save a UTF-8 copy")
+                .set_file_name(&suggested)
+                .add_filter("Delimited text", &["csv", "tsv", "tab"])
+                .blocking_save_file();
+            match picked {
+                None => return Err("Save cancelled.".to_string()),
+                Some(file) => file
+                    .into_path()
+                    .map_err(|e| format!("Could not use that location: {e}"))?,
+            }
+        }
+    };
+
+    tauri::async_runtime::spawn_blocking(move || {
+        text_export::write_utf8_copy(&source, encoding, &target)
+    })
+    .await
+    .map_err(|e| format!("Save failed: {e}"))?
+}
+
+fn utf8_copy_name(file_name: &str) -> String {
+    let path = Path::new(file_name);
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "spreadsheet".to_string());
+    match path.extension() {
+        Some(extension) => format!("{stem}-utf8.{}", extension.to_string_lossy()),
+        None => format!("{stem}-utf8"),
+    }
 }
 
 fn default_ods_name(file_name: &str) -> String {
@@ -406,10 +655,15 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             open_workbook,
             pick_workbook,
+            recent_files,
             initial_file,
             close_workbook,
             get_rows,
             export_ods,
+            save_utf8_copy,
+            remember_header,
+            remember_view,
+            sort_text_rows,
             association_status,
             install_associations,
             remove_associations,
@@ -443,6 +697,67 @@ mod tests {
         assert_eq!(default_ods_name("Budget 2026.xlsx"), "Budget 2026.ods");
         assert_eq!(default_ods_name("legacy.xls"), "legacy.ods");
         assert_eq!(default_ods_name("no-extension"), "no-extension.ods");
+    }
+
+    #[test]
+    fn a_remembered_header_is_passed_on_only_while_the_file_has_that_row() {
+        assert_eq!(stored_header_row(&text_prefs::Entry::default(), 5), None);
+        let pinned = text_prefs::Entry {
+            header_row: Some(Some(2)),
+            ..text_prefs::Entry::default()
+        };
+        assert_eq!(stored_header_row(&pinned, 5), Some(Some(2)));
+        // The file no longer has a third row: the first record pins instead of
+        // a row index that would point past the end.
+        assert_eq!(stored_header_row(&pinned, 2), None);
+        // Unpinned is a choice, and one the UI has to see.
+        let unpinned = text_prefs::Entry {
+            header_row: Some(None),
+            ..text_prefs::Entry::default()
+        };
+        assert_eq!(stored_header_row(&unpinned, 5), Some(None));
+    }
+
+    #[test]
+    fn a_remembered_position_is_fitted_to_the_sheet_it_names() {
+        let sheets = [(50, 8), (10, 2)];
+        let remembered = view_prefs::ViewState {
+            sheet: 1,
+            row: 40,
+            col: 6,
+            top: 1200.0,
+            left: 64.0,
+        };
+
+        // The second sheet has ten rows and two columns, so the cell is pulled
+        // back to one it has; the sheet itself is still the one to reopen.
+        let fitted = fit_view(remembered, &sheets).expect("a sheet the workbook has");
+        assert_eq!((fitted.sheet, fitted.row, fitted.col), (1, 9, 1));
+        assert_eq!((fitted.top, fitted.left), (1200.0, 64.0));
+
+        // A sheet the workbook no longer has is not a place to reopen at.
+        let gone = view_prefs::ViewState {
+            sheet: 2,
+            ..remembered
+        };
+        assert_eq!(fit_view(gone, &sheets), None);
+
+        // An offset that is not a number is not a position; a negative one is
+        // the top of the sheet, which is where the grid would land anyway.
+        let broken = view_prefs::ViewState {
+            top: f64::NAN,
+            left: -5.0,
+            ..remembered
+        };
+        let fitted = fit_view(broken, &sheets).expect("the sheet is still there");
+        assert_eq!((fitted.top, fitted.left), (0.0, 0.0));
+    }
+
+    #[test]
+    fn a_utf8_copy_keeps_the_files_extension() {
+        assert_eq!(utf8_copy_name("sales.csv"), "sales-utf8.csv");
+        assert_eq!(utf8_copy_name("sales.tsv"), "sales-utf8.tsv");
+        assert_eq!(utf8_copy_name("sales"), "sales-utf8");
     }
 
     #[test]

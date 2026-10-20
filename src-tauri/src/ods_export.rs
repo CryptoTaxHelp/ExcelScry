@@ -3,14 +3,20 @@
 //! Values keep their type: a number is written as `office:value-type="float"`,
 //! a date as `office:value-type="date"` and so on, so the result opens cleanly
 //! in LibreOffice, Excel and Google Sheets as a real spreadsheet rather than a
-//! wall of text.
+//! wall of text. A cell that was calculated keeps its formula beside its cached
+//! value, so reopening the report recalculates it rather than leaving a frozen
+//! number behind. Rows and columns a sheet hides stay hidden, and a sheet's
+//! frozen panes are written back as view settings, so the file opens the way it
+//! was laid out rather than as a flat wall of every row.
 
 use std::path::Path;
 
 use serde::Serialize;
+use spreadsheet_ods::sheet::Visibility;
 use spreadsheet_ods::style::RowStyle;
-use spreadsheet_ods::{write_ods, CellStyleRef, Length, Sheet, Value, WorkBook};
+use spreadsheet_ods::{write_ods_buf, CellStyleRef, Length, Sheet, Value, WorkBook};
 
+use crate::formula;
 use crate::model::{Cell, CellLook, LoadedWorkbook, SheetData, SheetLayout};
 use crate::ods_formats::FormatStyles;
 #[cfg(test)]
@@ -85,8 +91,13 @@ pub fn export(workbook: &LoadedWorkbook, out: &Path) -> Result<ExportSummary, St
                 // A cell's own format and appearance are independent: a total
                 // can be money and bold, a header can be plain text and filled.
                 let look = sheet.looks.get(row_idx, col_idx).unwrap_or(&plain);
-                let style =
-                    formats.style_for(&mut book, sheet.formats.get(row_idx, col_idx), look, styled);
+                let style = formats.style_for(
+                    &mut book,
+                    sheet.formats.get(row_idx, col_idx),
+                    matches!(cell, Cell::Text(_)),
+                    look,
+                    styled,
+                );
 
                 match cell {
                     Cell::Empty => continue,
@@ -130,7 +141,7 @@ pub fn export(workbook: &LoadedWorkbook, out: &Path) -> Result<ExportSummary, St
             let (Ok(row), Ok(col)) = (u32::try_from(row), u32::try_from(col)) else {
                 continue;
             };
-            let Some(style) = formats.style_for(&mut book, None, look, false) else {
+            let Some(style) = formats.style_for(&mut book, None, false, look, false) else {
                 continue;
             };
             ods_sheet.set_cellstyle(row, col, &style);
@@ -139,13 +150,28 @@ pub fn export(workbook: &LoadedWorkbook, out: &Path) -> Result<ExportSummary, St
         write_merges(&mut ods_sheet, &sheet.layout);
         write_row_heights(&mut book, &mut ods_sheet, sheet);
         ensure_trailing_columns(&mut ods_sheet, sheet);
+        write_hidden(&mut ods_sheet, sheet);
+        write_formulas(&mut ods_sheet, sheet);
 
         book.push_sheet(ods_sheet);
     }
 
-    write_ods(&mut book, out).map_err(|e| format!("Could not write \"{}\": {e}", out.display()))?;
+    // The package is built in memory so the view settings can be added to it:
+    // a frozen pane is not part of a sheet's content, and the writer has no way
+    // to say anything about it.
+    let mut package = write_ods_buf(&mut book, Vec::new())
+        .map_err(|e| format!("Could not write \"{}\": {e}", out.display()))?;
+    if workbook
+        .sheets
+        .iter()
+        .any(|s| s.layout.frozen_rows > 0 || s.layout.frozen_cols > 0)
+    {
+        package = with_view_settings(package, workbook)?;
+    }
+    std::fs::write(out, &package)
+        .map_err(|e| format!("Could not write \"{}\": {e}", out.display()))?;
 
-    let bytes = std::fs::metadata(out).map(|m| m.len()).unwrap_or(0);
+    let bytes = package.len() as u64;
 
     Ok(ExportSummary {
         path: out.display().to_string(),
@@ -242,10 +268,12 @@ fn write_row_heights(book: &mut WorkBook, sheet: &mut Sheet, data: &SheetData) {
     }
 }
 
-/// Make sure the table has a column for every width it was given.
+/// Make sure the table has a column for every width or hidden state it was
+/// given.
 ///
 /// The writer sizes its `table:table-column` elements from the used grid, so a
-/// wide but blank column at the edge of a report would otherwise vanish.
+/// wide but blank column at the edge of a report — or a hidden one — would
+/// otherwise vanish.
 fn ensure_trailing_columns(sheet: &mut Sheet, data: &SheetData) {
     let needed = data
         .cols
@@ -256,6 +284,13 @@ fn ensure_trailing_columns(sheet: &mut Sheet, data: &SheetData) {
                 .next_back()
                 .map_or(0, |col| col + 1),
         )
+        .max(
+            data.layout
+                .hidden_cols
+                .iter()
+                .next_back()
+                .map_or(0, |col| col + 1),
+        )
         .min(MAX_COLS);
     let (_, used) = sheet.used_grid_size();
     if needed > used as usize {
@@ -263,6 +298,164 @@ fn ensure_trailing_columns(sheet: &mut Sheet, data: &SheetData) {
         if matches!(sheet.value(0, col), Value::Empty) {
             sheet.set_value(0, col, Value::Empty);
         }
+    }
+}
+
+/// Collapse the rows and columns the sheet hides, so they stay hidden.
+///
+/// ODF records a hidden row or column as a `table:visibility="collapse"` on
+/// the row or column itself. The writer only visits rows that hold a cell, so
+/// an empty hidden row is given one; otherwise it would be written as part of a
+/// run of ordinary rows and come back visible.
+fn write_hidden(sheet: &mut Sheet, data: &SheetData) {
+    for &col in &data.layout.hidden_cols {
+        if col < MAX_COLS {
+            sheet.set_col_visible(col as u32, Visibility::Collapsed);
+        }
+    }
+    for &row in &data.layout.hidden_rows {
+        if row >= MAX_ROWS {
+            continue;
+        }
+        sheet.set_row_visible(row as u32, Visibility::Collapsed);
+        if matches!(sheet.value(row as u32, 0), Value::Empty) {
+            sheet.set_value(row as u32, 0, Value::Empty);
+        }
+    }
+}
+
+/// The view settings that make a sheet open with its panes frozen.
+///
+/// A frozen pane is not part of a sheet's content in ODF: LibreOffice keeps it
+/// in `settings.xml`, per sheet, as the split mode and position of the last
+/// view. `2` is the mode for a freeze, and the positions are the counts of
+/// frozen columns and rows — the same shape this app reads back.
+fn view_settings(workbook: &LoadedWorkbook) -> String {
+    let mut tables = String::new();
+    for sheet in &workbook.sheets {
+        let rows = sheet.layout.frozen_rows;
+        let cols = sheet.layout.frozen_cols;
+        if rows == 0 && cols == 0 {
+            continue;
+        }
+        let sheet_name = sanitize_sheet_name(&sheet.name);
+        let name = quick_xml::escape::escape(&sheet_name);
+        tables.push_str(&format!(
+            "      <config:config-item-map-entry config:name=\"{name}\">\n"
+        ));
+        if cols > 0 {
+            tables.push_str(SPLIT_HORIZONTAL);
+            tables.push_str(&format!(
+                "        <config:config-item config:name=\"HorizontalSplitPosition\" config:type=\"int\">{cols}</config:config-item>\n\
+                 <config:config-item config:name=\"PositionLeft\" config:type=\"short\">0</config:config-item>\n\
+                 <config:config-item config:name=\"PositionRight\" config:type=\"short\">{cols}</config:config-item>\n"
+            ));
+        }
+        if rows > 0 {
+            tables.push_str(SPLIT_VERTICAL);
+            tables.push_str(&format!(
+                "        <config:config-item config:name=\"VerticalSplitPosition\" config:type=\"int\">{rows}</config:config-item>\n\
+                 <config:config-item config:name=\"PositionTop\" config:type=\"short\">0</config:config-item>\n\
+                 <config:config-item config:name=\"PositionBottom\" config:type=\"short\">{rows}</config:config-item>\n"
+            ));
+        }
+        // 3 selects the pane below and to the right of the split: the one that
+        // scrolls, which is what a frozen header leaves the reader looking at.
+        tables.push_str(
+            "        <config:config-item config:name=\"ActiveSplitRange\" config:type=\"short\">3</config:config-item>\n",
+        );
+        tables.push_str("      </config:config-item-map-entry>\n");
+    }
+
+    let active = workbook
+        .sheets
+        .first()
+        .map(|sheet| sanitize_sheet_name(&sheet.name))
+        .unwrap_or_default();
+    let active = quick_xml::escape::escape(&active);
+
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <office:document-settings xmlns:office=\"urn:oasis:names:tc:opendocument:xmlns:office:1.0\" \
+         xmlns:ooo=\"http://openoffice.org/2004/office\" \
+         xmlns:config=\"urn:oasis:names:tc:opendocument:xmlns:config:1.0\" office:version=\"1.3\">\n\
+         <office:settings>\n\
+         <config:config-item-set config:name=\"ooo:view-settings\">\n\
+         <config:config-item-map-indexed config:name=\"Views\">\n\
+         <config:config-item-map-entry>\n\
+         <config:config-item config:name=\"ViewId\" config:type=\"string\">view1</config:config-item>\n\
+         <config:config-item-map-named config:name=\"Tables\">\n\
+         {tables}\
+         </config:config-item-map-named>\n\
+         <config:config-item config:name=\"ActiveTable\" config:type=\"string\">{active}</config:config-item>\n\
+         </config:config-item-map-entry>\n\
+         </config:config-item-map-indexed>\n\
+         </config:config-item-set>\n\
+         </office:settings>\n\
+         </office:document-settings>\n"
+    )
+}
+
+/// Mode 2 is a freeze rather than a movable split, for the vertical bar that
+/// pins columns at the left.
+const SPLIT_HORIZONTAL: &str = "        <config:config-item config:name=\"HorizontalSplitMode\" config:type=\"short\">2</config:config-item>\n";
+
+/// The same, for the horizontal bar that pins rows at the top.
+const SPLIT_VERTICAL: &str = "        <config:config-item config:name=\"VerticalSplitMode\" config:type=\"short\">2</config:config-item>\n";
+
+/// Rebuild the written package with its empty `settings.xml` replaced.
+fn with_view_settings(package: Vec<u8>, workbook: &LoadedWorkbook) -> Result<Vec<u8>, String> {
+    use std::io::{Cursor, Write};
+    use zip::write::SimpleFileOptions;
+
+    let settings = view_settings(workbook);
+    let fail = |e: zip::result::ZipError| format!("Could not finish the export: {e}");
+
+    let mut archive = zip::ZipArchive::new(Cursor::new(package)).map_err(fail)?;
+    let mut out = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).map_err(fail)?;
+        let name = entry.name().to_string();
+        if name == "settings.xml" {
+            continue;
+        }
+        // The compression matters for `mimetype`, which ODF requires to be the
+        // first entry and stored rather than deflated.
+        let options = SimpleFileOptions::default()
+            .compression_method(entry.compression())
+            .unix_permissions(entry.unix_mode().unwrap_or(0o644));
+        if entry.is_dir() {
+            out.add_directory(name, options).map_err(fail)?;
+            continue;
+        }
+        out.start_file(name, options).map_err(fail)?;
+        std::io::copy(&mut entry, &mut out)
+            .map_err(|e| format!("Could not finish the export: {e}"))?;
+    }
+    out.start_file("settings.xml", SimpleFileOptions::default())
+        .map_err(fail)?;
+    out.write_all(settings.as_bytes())
+        .map_err(|e| format!("Could not finish the export: {e}"))?;
+    Ok(out.finish().map_err(fail)?.into_inner())
+}
+
+/// Write each calculation beside its result.
+///
+/// A formula that cannot be expressed faithfully is left out rather than
+/// written wrong: the cell keeps the value it already has, which is still
+/// correct as of the file it came from.
+fn write_formulas(sheet: &mut Sheet, data: &SheetData) {
+    if data.formulas.is_empty() {
+        return;
+    }
+    for (row, col, raw) in data.formulas.iter() {
+        if row >= MAX_ROWS || col >= MAX_COLS {
+            continue;
+        }
+        let Some(formula) = formula::open_formula(raw) else {
+            continue;
+        };
+        sheet.set_formula(row as u32, col as u32, formula);
     }
 }
 
@@ -416,6 +609,7 @@ mod tests {
                 formats: Default::default(),
                 looks: Default::default(),
                 layout: Default::default(),
+                formulas: Default::default(),
             }],
             truncated: false,
             total_cells: 20,
@@ -595,6 +789,7 @@ mod tests {
                 formats,
                 looks: Default::default(),
                 layout: Default::default(),
+                formulas: Default::default(),
             }],
             truncated: false,
             total_cells: 20,
@@ -786,6 +981,7 @@ mod tests {
                 formats: Default::default(),
                 looks,
                 layout,
+                formulas: Default::default(),
             }],
             truncated: false,
             total_cells: 9,
@@ -953,6 +1149,7 @@ mod tests {
                 formats: Default::default(),
                 looks: Default::default(),
                 layout,
+                formulas: Default::default(),
             }],
             truncated: false,
             total_cells: 20,
@@ -1071,6 +1268,7 @@ mod tests {
                 formats,
                 looks: Default::default(),
                 layout: Default::default(),
+                formulas: Default::default(),
             }],
             truncated: false,
             total_cells: 8,
@@ -1160,6 +1358,488 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&out);
+    }
+
+    /// A small report whose calculated cells are the point: each one carries
+    /// a formula taken from a different source, plus values that must stay put.
+    fn workbook_with_formulas() -> LoadedWorkbook {
+        use crate::model::SheetFormulas;
+
+        let rows = vec![
+            vec![
+                C::Text("Region".into()),
+                C::Text("Qty".into()),
+                C::Text("Total".into()),
+            ],
+            vec![C::Text("North".into()), C::Int(2), C::Int(20)],
+            vec![C::Text("South".into()), C::Int(3), C::Int(30)],
+            vec![C::Text("Sum".into()), C::Int(5), C::Int(50)],
+            // The last row holds a formula read from an ODS (already
+            // OpenFormula) and one this app cannot express faithfully.
+            vec![C::Text("Delta".into()), C::Int(0), C::Int(1)],
+        ];
+
+        let mut formulas = SheetFormulas::default();
+        // Excel's spelling: references bare, no leading `=`.
+        formulas.insert(1, 2, "B2*10");
+        formulas.insert(2, 2, "B3*10");
+        formulas.insert(3, 1, "SUM(B2:B3)");
+        formulas.insert(3, 2, "SUM(C2:C3)");
+        // An ODS read in keeps the text it came with.
+        formulas.insert(4, 1, "of:=SUM([.B2:.B3])");
+        // A structured reference has no OpenFormula form here.
+        formulas.insert(4, 2, "SUM(Table1[Qty])");
+        // A calculated cell with nothing cached yet: the formula is all the
+        // file has, and it must still be written.
+        formulas.insert(5, 1, "SUM(B2:B3)");
+
+        LoadedWorkbook {
+            path: "memory.xlsx".into(),
+            file_name: "memory.xlsx".into(),
+            format: "Excel Workbook (xlsx)".into(),
+            file_size: 0,
+            sheets: vec![SheetData {
+                name: "Report".into(),
+                rows,
+                cols: 3,
+                formats: Default::default(),
+                looks: Default::default(),
+                layout: Default::default(),
+                formulas,
+            }],
+            truncated: false,
+            total_cells: 15,
+            used_cells: 15,
+            trust: TrustReport::new(Trust::unknown()),
+            text: None,
+        }
+    }
+
+    #[test]
+    fn formulas_are_written_so_a_reopened_report_recalculates() {
+        let wb = workbook_with_formulas();
+        let out = temp_path("formulas.ods");
+        let _ = std::fs::remove_file(&out);
+        export(&wb, &out).expect("export should succeed");
+
+        // The attribute a spreadsheet recalculates from.
+        let xml = content_xml(&out);
+        assert!(
+            xml.contains("table:formula=\"of:=[.B2]*10\""),
+            "a translated formula never reached the file"
+        );
+        assert!(
+            xml.contains("table:formula=\"of:=SUM([.B2:.B3])\""),
+            "a range formula never reached the file"
+        );
+        assert!(
+            !xml.contains("Table1[Qty]"),
+            "a formula that cannot be translated must be left out"
+        );
+
+        // Reopen it the way the app does: the values are still cached, and
+        // every formula is there for the next edit to recalculate.
+        let back = crate::workbook::load_with(&out, crate::text_table::Dialect::default())
+            .expect("the exported workbook should open");
+        let sheet = &back.sheets[0];
+
+        let mut found: Vec<(usize, usize, String)> = sheet
+            .formulas
+            .iter()
+            .map(|(row, col, text)| (row, col, text.to_string()))
+            .collect();
+        found.sort();
+        assert_eq!(
+            found,
+            vec![
+                (1, 2, "of:=[.B2]*10".to_string()),
+                (2, 2, "of:=[.B3]*10".to_string()),
+                (3, 1, "of:=SUM([.B2:.B3])".to_string()),
+                (3, 2, "of:=SUM([.C2:.C3])".to_string()),
+                (4, 1, "of:=SUM([.B2:.B3])".to_string()),
+                (5, 1, "of:=SUM([.B2:.B3])".to_string()),
+            ],
+            "the formulas did not survive the round trip"
+        );
+
+        // Values stay as the file showed them, so a reader that does not
+        // recalculate still sees the report it exported. ODF stores every
+        // number as a float, so the figure is what matters, not its tag.
+        let number = |cell: &C| match cell {
+            C::Int(v) => *v as f64,
+            C::Float(v) => *v,
+            other => panic!("expected a number, got {other:?}"),
+        };
+        assert_eq!(number(sheet.cell(1, 2)), 20.0);
+        assert_eq!(number(sheet.cell(3, 1)), 5.0);
+        // The untranslatable cell keeps its value and gains no formula.
+        assert_eq!(number(sheet.cell(4, 2)), 1.0);
+        assert!(
+            !found.iter().any(|(row, col, _)| (*row, *col) == (4, 2)),
+            "an untranslatable formula must not be written"
+        );
+
+        let _ = std::fs::remove_file(&out);
+    }
+
+    /// A sheet with a column and two rows hidden, one of them past the data,
+    /// and one row and one column frozen.
+    fn workbook_with_hidden_and_frozen() -> LoadedWorkbook {
+        use std::collections::BTreeSet;
+
+        let rows = vec![
+            vec![
+                C::Text("Region".into()),
+                C::Text("Qty".into()),
+                C::Text("Note".into()),
+            ],
+            vec![C::Text("North".into()), C::Int(4), C::Text("ok".into())],
+            vec![C::Text("South".into()), C::Int(6), C::Text("late".into())],
+            vec![C::Text("East".into()), C::Int(2), C::Text("ok".into())],
+        ];
+
+        let mut layout = SheetLayout {
+            hidden_cols: BTreeSet::from([1]),
+            hidden_rows: BTreeSet::from([2, 9]),
+            frozen_rows: 1,
+            frozen_cols: 1,
+            ..SheetLayout::default()
+        };
+        // A hidden column still has a width, which must not be lost either.
+        layout.col_widths.insert(1, 60.0);
+
+        LoadedWorkbook {
+            path: "memory.xlsx".into(),
+            file_name: "memory.xlsx".into(),
+            format: "Excel Workbook (xlsx)".into(),
+            file_size: 0,
+            sheets: vec![SheetData {
+                name: "Report".into(),
+                rows,
+                cols: 3,
+                formats: Default::default(),
+                looks: Default::default(),
+                layout,
+                formulas: Default::default(),
+            }],
+            truncated: false,
+            total_cells: 12,
+            used_cells: 12,
+            trust: TrustReport::new(Trust::unknown()),
+            text: None,
+        }
+    }
+
+    /// One part of an exported package, as text.
+    fn part_text(path: &std::path::Path, name: &str) -> String {
+        use std::io::Read;
+        let file = std::fs::File::open(path).unwrap();
+        let mut zip = zip::ZipArchive::new(file).unwrap();
+        let mut entry = zip.by_name(name).unwrap();
+        let mut text = String::new();
+        entry.read_to_string(&mut text).unwrap();
+        text
+    }
+
+    #[test]
+    fn hidden_rows_columns_and_frozen_panes_survive_the_export() {
+        let wb = workbook_with_hidden_and_frozen();
+        let out = temp_path("layout.ods");
+        let _ = std::fs::remove_file(&out);
+        export(&wb, &out).expect("export should succeed");
+
+        // The rows and columns are collapsed in the sheet itself.
+        let xml = content_xml(&out);
+        assert!(
+            xml.matches("table:visibility=\"collapse\"").count() >= 2,
+            "hidden rows or columns were not written as hidden"
+        );
+        assert!(
+            xml.contains("<table:table-column") && xml.contains("table:visibility=\"collapse\""),
+            "a hidden column must stay a column, marked collapsed"
+        );
+
+        // The freeze is a view setting, beside the content rather than in it.
+        let settings = part_text(&out, "settings.xml");
+        assert!(
+            settings.contains("ooo:view-settings") && settings.contains("config:name=\"Tables\""),
+            "the package has no view settings"
+        );
+        assert!(
+            settings.contains("HorizontalSplitMode") && settings.contains("VerticalSplitMode"),
+            "the freeze was not written: {settings}"
+        );
+        assert!(
+            settings.contains("config:name=\"Report\""),
+            "the freeze is not tied to its sheet: {settings}"
+        );
+
+        // Reopening the way the app does must show the same geometry: the
+        // hidden column, both hidden rows (one of them past the data), and
+        // the frozen pane.
+        let back = crate::workbook::load_with(&out, crate::text_table::Dialect::default())
+            .expect("the exported workbook should open");
+        let layout = &back.sheets[0].layout;
+        assert_eq!(layout.hidden_cols.iter().copied().collect::<Vec<_>>(), [1]);
+        assert_eq!(
+            layout.hidden_rows.iter().copied().collect::<Vec<_>>(),
+            [2, 9]
+        );
+        assert_eq!(layout.frozen_rows, 1);
+        assert_eq!(layout.frozen_cols, 1);
+        assert_eq!(
+            layout.col_widths.get(&1).copied(),
+            Some(60.0),
+            "the hidden column lost its width"
+        );
+
+        // The values are untouched by all of this.
+        assert_eq!(back.sheets[0].cell(1, 0), &C::Text("North".into()));
+
+        let _ = std::fs::remove_file(&out);
+    }
+
+    /// A sheet whose formats use the two sections ODF has no direct spelling
+    /// for: a zero section with nothing in it, and a fourth section for text.
+    fn workbook_with_empty_and_text_sections() -> LoadedWorkbook {
+        use crate::model::SheetFormats;
+        use crate::number_format::NumberFormat;
+        use ssfmt::DateSystem;
+
+        let rows = vec![
+            vec![C::Text("Amount".into()), C::Text("Note".into())],
+            vec![C::Float(1234.0), C::Float(1234.5)],
+            vec![C::Float(0.0), C::Text("anything".into())],
+        ];
+
+        let hidden_zero =
+            NumberFormat::parse("#,##0;-#,##0;", DateSystem::Date1900).expect("a hide-zero format");
+        let with_text = NumberFormat::parse(r#"0.00;[Red]-0.00;0.00;"T: "@"#, DateSystem::Date1900)
+            .expect("a four-section format");
+        let mut formats = SheetFormats::default();
+        for row in 0..3 {
+            formats.insert(row, 0, hidden_zero.clone());
+            formats.insert(row, 1, with_text.clone());
+        }
+
+        LoadedWorkbook {
+            path: "memory.xlsx".into(),
+            file_name: "memory.xlsx".into(),
+            format: "Excel Workbook (xlsx)".into(),
+            file_size: 0,
+            sheets: vec![SheetData {
+                name: "Sections".into(),
+                rows,
+                cols: 2,
+                formats,
+                looks: Default::default(),
+                layout: Default::default(),
+                formulas: Default::default(),
+            }],
+            truncated: false,
+            total_cells: 6,
+            used_cells: 6,
+            trust: TrustReport::new(Trust::unknown()),
+            text: None,
+        }
+    }
+
+    #[test]
+    fn hidden_zeros_and_the_text_section_survive_the_export() {
+        let wb = workbook_with_empty_and_text_sections();
+        let out = temp_path("sections-text.ods");
+        let _ = std::fs::remove_file(&out);
+        export(&wb, &out).expect("export should succeed");
+
+        let xml = content_xml(&out);
+        assert!(
+            xml.contains("style:condition=\"value()=0\""),
+            "the zero section was not mapped"
+        );
+        assert!(
+            xml.contains("<number:text-style"),
+            "the text section was not written as a text style"
+        );
+        assert!(
+            xml.contains("number:text-content"),
+            "the text style has nowhere to put the cell's text"
+        );
+
+        // Reopen the way the app does: a zero shows nothing, the numbers keep
+        // their format, and a text cell gets the label the fourth section asks
+        // for while a number with the same code does not.
+        let back = crate::workbook::load_with(&out, crate::text_table::Dialect::default())
+            .expect("the exported workbook should open");
+        let sheet = &back.sheets[0];
+        let shown = |row: usize, col: usize, cell: &C| {
+            sheet
+                .formats
+                .get(row, col)
+                .and_then(|format| format.render(cell))
+        };
+
+        assert_eq!(
+            shown(2, 0, &C::Float(0.0)).as_deref(),
+            Some(""),
+            "a hidden zero came back as a number"
+        );
+        assert_eq!(shown(1, 0, &C::Float(1234.0)).as_deref(), Some("1,234"));
+        assert_eq!(
+            shown(2, 1, &C::Text("anything".into())).as_deref(),
+            Some("T: anything"),
+            "the text section was not applied to text"
+        );
+        // The same code on a number must keep the numeric style, not the text
+        // style the text cell beside it uses.
+        assert_eq!(
+            shown(1, 1, &C::Float(1234.5)).as_deref(),
+            Some("1234.50"),
+            "the text style leaked onto numbers"
+        );
+
+        let _ = std::fs::remove_file(&out);
+    }
+
+    #[test]
+    fn a_literal_text_section_survives_the_export() {
+        use crate::model::SheetFormats;
+        use crate::number_format::NumberFormat;
+        use ssfmt::DateSystem;
+
+        // A fourth section with no `@` shows the literal for any text.
+        let format = NumberFormat::parse(r#"0;0;0;"n/a""#, DateSystem::Date1900).unwrap();
+        let mut formats = SheetFormats::default();
+        formats.insert(0, 0, format.clone());
+
+        let wb = LoadedWorkbook {
+            path: "memory.xlsx".into(),
+            file_name: "memory.xlsx".into(),
+            format: "Excel Workbook (xlsx)".into(),
+            file_size: 0,
+            sheets: vec![SheetData {
+                name: "Literal".into(),
+                rows: vec![vec![C::Text("whatever".into())]],
+                cols: 1,
+                formats,
+                looks: Default::default(),
+                layout: Default::default(),
+                formulas: Default::default(),
+            }],
+            truncated: false,
+            total_cells: 1,
+            used_cells: 1,
+            trust: TrustReport::new(Trust::unknown()),
+            text: None,
+        };
+
+        let out = temp_path("literal-text.ods");
+        let _ = std::fs::remove_file(&out);
+        export(&wb, &out).expect("export should succeed");
+
+        let back = crate::workbook::load_with(&out, crate::text_table::Dialect::default())
+            .expect("the exported workbook should open");
+        let sheet = &back.sheets[0];
+        let shown = sheet
+            .formats
+            .get(0, 0)
+            .and_then(|format| format.render(&C::Text("whatever".into())));
+        assert_eq!(
+            shown.as_deref(),
+            Some("n/a"),
+            "a literal text section came back as {:?}",
+            shown
+        );
+
+        let _ = std::fs::remove_file(&out);
+    }
+
+    #[test]
+    fn an_empty_text_section_hides_text() {
+        use crate::model::SheetFormats;
+        use crate::number_format::NumberFormat;
+        use ssfmt::DateSystem;
+
+        // `0;;;` hides text along with the numbers, so its fourth section is
+        // empty and the export has to write a text style that shows nothing.
+        let format = NumberFormat::parse("0;0;0;", DateSystem::Date1900).unwrap();
+        let mut formats = SheetFormats::default();
+        formats.insert(0, 0, format.clone());
+        formats.insert(0, 1, format.clone());
+
+        let wb = LoadedWorkbook {
+            path: "memory.xlsx".into(),
+            file_name: "memory.xlsx".into(),
+            format: "Excel Workbook (xlsx)".into(),
+            file_size: 0,
+            sheets: vec![SheetData {
+                name: "Hidden".into(),
+                rows: vec![vec![C::Text("anything".into()), C::Float(7.0)]],
+                cols: 2,
+                formats,
+                looks: Default::default(),
+                layout: Default::default(),
+                formulas: Default::default(),
+            }],
+            truncated: false,
+            total_cells: 2,
+            used_cells: 2,
+            trust: TrustReport::new(Trust::unknown()),
+            text: None,
+        };
+
+        let out = temp_path("hidden-text.ods");
+        let _ = std::fs::remove_file(&out);
+        export(&wb, &out).expect("export should succeed");
+
+        let back = crate::workbook::load_with(&out, crate::text_table::Dialect::default())
+            .expect("the exported workbook should open");
+        let sheet = &back.sheets[0];
+        let shown = |row: usize, col: usize, cell: &C| {
+            sheet
+                .formats
+                .get(row, col)
+                .and_then(|format| format.render(cell))
+        };
+
+        assert_eq!(
+            shown(0, 0, &C::Text("anything".into())).as_deref(),
+            Some(""),
+            "an empty fourth section must hide text"
+        );
+        assert_eq!(
+            shown(0, 1, &C::Float(7.0)).as_deref(),
+            Some("7"),
+            "the hidden text section must not reach the numbers"
+        );
+        // The style must not have swallowed the values themselves.
+        assert_eq!(sheet.cell(0, 0), &C::Text("anything".into()));
+        assert_eq!(sheet.cell(0, 1), &C::Float(7.0));
+
+        let _ = std::fs::remove_file(&out);
+    }
+
+    #[test]
+    fn view_settings_are_well_formed_and_escape_their_sheet_names() {
+        let mut wb = workbook_with_hidden_and_frozen();
+        wb.sheets[0].name = "R&D \"Q3\"".into();
+        let xml = view_settings(&wb);
+
+        // Every attribute has to hold together, or the package opens as junk.
+        let mut reader = quick_xml::Reader::from_str(&xml);
+        let mut buffer = Vec::new();
+        loop {
+            match reader.read_event_into(&mut buffer) {
+                Ok(quick_xml::events::Event::Eof) => break,
+                Ok(_) => {}
+                Err(e) => panic!("written settings.xml is not well-formed: {e}"),
+            }
+            buffer.clear();
+        }
+        assert!(
+            xml.contains("R&amp;D &quot;Q3&quot;"),
+            "a sheet name must be escaped, not spliced in: {xml}"
+        );
+        assert!(xml.contains("HorizontalSplitPosition\" config:type=\"int\">1"));
     }
 
     #[test]

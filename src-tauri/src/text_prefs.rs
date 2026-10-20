@@ -3,9 +3,18 @@
 //! A `.csv` is bytes plus a convention, and the convention a particular file
 //! uses is worth keeping: an export that is semicolon-separated Windows-1252
 //! every week should not have to be fixed every week. The file's path, made
-//! absolute and canonical where the filesystem allows, is the key; what is
-//! stored is only what was chosen by hand, never what detection worked out, so
-//! a file with nothing to remember keeps being read by its own bytes.
+//! absolute and canonical where the filesystem allows, is the key. An entry
+//! also records the file's length and modification time, and is dropped when
+//! those no longer match, so a different file put at the same path starts from
+//! detection. What is stored is only what was chosen by hand, never what
+//! detection worked out, so a file with nothing to remember keeps being read
+//! by its own bytes.
+//!
+//! The row pinned as the file's header lives here too. It is not part of the
+//! dialect — nothing about it is read from the bytes — but it is the same kind
+//! of choice for the same file, made in the same bar, and it is forgotten on
+//! the same terms: an export replaced by a different one starts again from its
+//! own first record.
 //!
 //! This is a convenience, not a record the reader depends on: a store that
 //! cannot be read or written is ignored, and the file opens with detection as
@@ -14,6 +23,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
 
@@ -26,7 +36,7 @@ const STORE_FILE: &str = "text-dialects.json";
 /// otherwise lose one of them.
 static LOCK: Mutex<()> = Mutex::new(());
 
-/// The choices remembered for one file. Both are optional because the user may
+/// The choices remembered for one file. Each is optional because the user may
 /// have fixed only the delimiter, leaving the encoding to detection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry {
@@ -34,6 +44,32 @@ pub struct Entry {
     pub delimiter: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encoding: Option<String>,
+    /// The row pinned as the header, counted from zero as the grid counts it.
+    ///
+    /// Three states, which is why this is an `Option` of an `Option`: absent
+    /// when nobody has chosen one (the first record pins), `Some(None)` when the
+    /// user unpinned the file deliberately — a headerless file should open
+    /// headerless next time — and `Some(Some(row))` for a row.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub header_row: Option<Option<usize>>,
+}
+
+/// Read a field that is absent, `null`, or a value, as the three things they
+/// are.
+///
+/// `serde` maps `null` to `None` for an `Option`, which would make "nobody
+/// chose a header" and "unpinned on purpose" the same state — and the file
+/// would come back with a header after being left without one.
+fn deserialize_double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
 }
 
 impl Entry {
@@ -42,11 +78,12 @@ impl Entry {
         Entry {
             delimiter: dialect.delimiter.map(|chosen| chosen.label().to_string()),
             encoding: dialect.encoding.map(|chosen| chosen.label().to_string()),
+            header_row: None,
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.delimiter.is_none() && self.encoding.is_none()
+        self.delimiter.is_none() && self.encoding.is_none() && self.header_row.is_none()
     }
 
     fn delimiter(&self) -> Option<Delimiter> {
@@ -56,6 +93,45 @@ impl Entry {
     fn encoding(&self) -> Option<Encoding> {
         self.encoding.as_deref().and_then(Encoding::from_label)
     }
+}
+
+/// What a file looked like when its dialect was remembered.
+///
+/// Length and modification time are enough to notice an edit, or a different
+/// file put at the same path, without reading the file a second time just to
+/// open it. A missing or unreadable file has no stamp, so its entry is dropped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct Stamp {
+    len: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    modified: Option<u64>,
+}
+
+impl Stamp {
+    fn of(path: &Path) -> Option<Self> {
+        let metadata = std::fs::metadata(path).ok()?;
+        Some(Stamp {
+            len: metadata.len(),
+            modified: metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .and_then(|elapsed| u64::try_from(elapsed.as_nanos()).ok()),
+        })
+    }
+
+    fn matches(&self, path: &Path) -> bool {
+        Stamp::of(path).as_ref() == Some(self)
+    }
+}
+
+/// A choice and the file state it was made against.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Stored {
+    #[serde(flatten)]
+    entry: Entry,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stamp: Option<Stamp>,
 }
 
 /// The dialect a file should be read with.
@@ -76,9 +152,33 @@ pub fn resolve(requested: Dialect, remembered: &Entry, explicit: bool) -> Dialec
 }
 
 /// What was remembered for `path`, or nothing.
+///
+/// An entry whose file has changed since it was made is removed rather than
+/// returned: a different export at the same path should be read by its own
+/// bytes, not by the choices the old one needed.
 pub fn lookup(directory: &Path, path: &Path) -> Entry {
     let _guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    read(directory).files.remove(&key(path)).unwrap_or_default()
+    let mut store = read(directory);
+    let key = key(path);
+    let current = store.files.get(&key).is_some_and(|stored| {
+        stored
+            .stamp
+            .as_ref()
+            .is_some_and(|stamp| stamp.matches(path))
+    });
+    if !current {
+        if store.files.remove(&key).is_some() {
+            // A stale choice should not linger in the store; if this write
+            // fails it will simply be dropped again on the next open.
+            let _ = write(directory, &store);
+        }
+        return Entry::default();
+    }
+    store
+        .files
+        .get(&key)
+        .map(|stored| stored.entry.clone())
+        .unwrap_or_default()
 }
 
 /// Remember `entry` for `path`, or forget it when the entry says nothing.
@@ -86,11 +186,73 @@ pub fn remember(directory: &Path, path: &Path, entry: Entry) {
     let _guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut store = read(directory);
     let key = key(path);
+    // The delimiter and encoding are chosen at one moment and the header row at
+    // another, so replacing one must not throw the other away. Only an entry
+    // that still describes this file is worth carrying over: one left by a
+    // different file at the same path is not this file's header.
+    let mut entry = entry;
+    if entry.header_row.is_none() {
+        entry.header_row = store
+            .files
+            .get(&key)
+            .filter(|stored| {
+                stored
+                    .stamp
+                    .as_ref()
+                    .is_some_and(|stamp| stamp.matches(path))
+            })
+            .and_then(|stored| stored.entry.header_row);
+    }
     if entry.is_empty() {
         store.files.remove(&key);
+    } else if let Some(stamp) = Stamp::of(path) {
+        store.files.insert(
+            key,
+            Stored {
+                entry,
+                stamp: Some(stamp),
+            },
+        );
     } else {
-        store.files.insert(key, entry);
+        // Without a stamp this could never be shown to still belong to the
+        // file, so storing it would only leave an entry lookup has to drop.
+        store.files.remove(&key);
     }
+    // A choice that cannot be written still applies to this session; failing to
+    // open the file over it would be worse than forgetting it next time.
+    let _ = write(directory, &store);
+}
+
+/// Remember the header row chosen for `path`, keeping the dialect it is read
+/// with.
+///
+/// `None` records that the file was unpinned on purpose, which reopens it with
+/// no header rather than with its first record. An entry left by a different
+/// file at the same path is not carried over: its rows are not this file's.
+pub fn remember_header(directory: &Path, path: &Path, header_row: Option<usize>) {
+    let _guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut store = read(directory);
+    let key = key(path);
+    let Some(stamp) = Stamp::of(path) else {
+        // Without a stamp this could never be shown to belong to the file.
+        store.files.remove(&key);
+        let _ = write(directory, &store);
+        return;
+    };
+    let mut entry = store
+        .files
+        .get(&key)
+        .filter(|stored| stored.stamp.as_ref() == Some(&stamp))
+        .map(|stored| stored.entry.clone())
+        .unwrap_or_default();
+    entry.header_row = Some(header_row);
+    store.files.insert(
+        key,
+        Stored {
+            entry,
+            stamp: Some(stamp),
+        },
+    );
     // A choice that cannot be written still applies to this session; failing to
     // open the file over it would be worse than forgetting it next time.
     let _ = write(directory, &store);
@@ -102,7 +264,19 @@ pub fn remember(directory: &Path, path: &Path, entry: Entry) {
 /// another spelling, a relative path or a symlink is the same file. Windows
 /// paths are folded to one case because its filesystems are not case-sensitive.
 fn key(path: &Path) -> String {
-    let resolved: PathBuf = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    // The file itself may be gone by the time an entry is looked up. Its parent
+    // can still be canonical, so a deleted file finds the entry it left rather
+    // than keeping it forever under a spelling the next lookup cannot reach.
+    let resolved: PathBuf = std::fs::canonicalize(path).unwrap_or_else(|_| {
+        let parent = match path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            _ => Path::new("."),
+        };
+        match (std::fs::canonicalize(parent), path.file_name()) {
+            (Ok(parent), Some(name)) => parent.join(name),
+            _ => path.to_path_buf(),
+        }
+    });
     let text = resolved.to_string_lossy().into_owned();
     if cfg!(windows) {
         text.to_lowercase()
@@ -114,7 +288,7 @@ fn key(path: &Path) -> String {
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Store {
     #[serde(default)]
-    files: BTreeMap<String, Entry>,
+    files: BTreeMap<String, Stored>,
 }
 
 /// Read the store, treating anything unreadable as empty.
@@ -144,6 +318,7 @@ fn write(directory: &Path, store: &Store) -> Result<(), String> {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::time::{Duration, SystemTime};
 
     fn directory(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join("excelscry-text-prefs").join(name);
@@ -163,7 +338,106 @@ mod tests {
         Entry {
             delimiter: delimiter.map(str::to_string),
             encoding: encoding.map(str::to_string),
+            header_row: None,
         }
+    }
+
+    /// The entry for a file whose header is `header_row`, where `None` means
+    /// the user unpinned it and `Some(None)` that nobody chose.
+    fn with_header(mut entry: Entry, header_row: Option<usize>) -> Entry {
+        entry.header_row = Some(header_row);
+        entry
+    }
+
+    #[test]
+    fn a_header_row_is_remembered_across_a_fresh_process() {
+        let dir = directory("header");
+        let path = file(&dir, "report.csv");
+        remember_header(&dir, &path, Some(2));
+
+        // A fresh process would read the file, not a cached map.
+        let store = read(&dir);
+        let stored = store.files.get(&key(&path)).expect("the entry");
+        assert_eq!(stored.entry.header_row, Some(Some(2)));
+        assert_eq!(lookup(&dir, &path).header_row, Some(Some(2)));
+    }
+
+    #[test]
+    fn unpinning_a_file_is_remembered_as_a_choice() {
+        let dir = directory("unpinned");
+        let path = file(&dir, "raw.csv");
+        remember_header(&dir, &path, None);
+
+        // Absent would mean "nobody chose", which pins the first record again.
+        assert_eq!(lookup(&dir, &path).header_row, Some(None));
+        assert!(
+            !lookup(&dir, &path).is_empty(),
+            "an entry that only says 'no header' is still a choice"
+        );
+    }
+
+    #[test]
+    fn the_header_and_the_dialect_do_not_overwrite_each_other() {
+        let dir = directory("both");
+        let path = file(&dir, "report.csv");
+        remember_header(&dir, &path, Some(2));
+        remember(&dir, &path, chosen(Some("semicolon"), Some("Windows-1252")));
+
+        assert_eq!(
+            lookup(&dir, &path),
+            with_header(chosen(Some("semicolon"), Some("Windows-1252")), Some(2))
+        );
+
+        // And the other way round: choosing the encoding again keeps the row.
+        remember_header(&dir, &path, Some(3));
+        remember(&dir, &path, chosen(Some("tab"), None));
+        assert_eq!(
+            lookup(&dir, &path),
+            with_header(chosen(Some("tab"), None), Some(3))
+        );
+    }
+
+    #[test]
+    fn an_edited_file_forgets_its_header_row() {
+        let dir = directory("edited-header");
+        let path = file(&dir, "report.csv");
+        remember_header(&dir, &path, Some(2));
+
+        std::fs::write(&path, b"a;b\nc;d\n").expect("new contents");
+
+        assert_eq!(lookup(&dir, &path), Entry::default());
+        // A new export at the same path does not inherit the old rows either.
+        remember(&dir, &path, chosen(Some("semicolon"), None));
+        assert_eq!(lookup(&dir, &path).header_row, None);
+    }
+
+    #[test]
+    fn a_header_row_survives_the_store_being_read_back() {
+        let dir = directory("header-json");
+        let path = file(&dir, "report.csv");
+        remember_header(&dir, &path, Some(4));
+        remember(&dir, &path, chosen(None, Some("windows-1252")));
+
+        let text = std::fs::read_to_string(dir.join(STORE_FILE)).expect("the store");
+        let store: Store = serde_json::from_str(&text).expect("valid JSON");
+        let stored = store.files.get(&key(&path)).expect("the entry");
+        assert_eq!(stored.entry.header_row, Some(Some(4)));
+
+        // "No header" is written as null rather than left out, so reopening
+        // does not pin the first record again.
+        remember_header(&dir, &path, None);
+        let text = std::fs::read_to_string(dir.join(STORE_FILE)).expect("the store");
+        assert!(text.contains("\"header_row\": null"), "{text}");
+        let store: Store = serde_json::from_str(&text).expect("valid JSON");
+        assert_eq!(
+            store
+                .files
+                .get(&key(&path))
+                .expect("the entry")
+                .entry
+                .header_row,
+            Some(None)
+        );
     }
 
     #[test]
@@ -193,9 +467,57 @@ mod tests {
 
         // A fresh process would read the file, not a cached map.
         let store = read(&dir);
-        let entry = store.files.get(&key(&path)).expect("the entry");
-        assert_eq!(entry.delimiter(), Some(Delimiter::Pipe));
-        assert_eq!(entry.encoding(), Some(Encoding::Utf16Le));
+        let stored = store.files.get(&key(&path)).expect("the entry");
+        assert_eq!(stored.entry.delimiter(), Some(Delimiter::Pipe));
+        assert_eq!(stored.entry.encoding(), Some(Encoding::Utf16Le));
+        assert!(stored.stamp.is_some(), "the file state is recorded too");
+    }
+
+    #[test]
+    fn an_edited_file_forgets_the_choice_it_was_given() {
+        let dir = directory("edited");
+        let path = file(&dir, "data.csv");
+        remember(&dir, &path, chosen(Some("semicolon"), Some("Windows-1252")));
+
+        std::fs::write(&path, b"a|b|c\nd|e|f\n").expect("new contents");
+
+        assert_eq!(lookup(&dir, &path), Entry::default());
+        assert!(
+            read(&dir).files.is_empty(),
+            "the stale entry is removed from the store"
+        );
+    }
+
+    #[test]
+    fn a_file_that_is_gone_forgets_the_choice_it_was_given() {
+        let dir = directory("gone");
+        let path = file(&dir, "data.csv");
+        remember(&dir, &path, chosen(Some("pipe"), None));
+        std::fs::remove_file(&path).expect("remove the fixture");
+
+        assert_eq!(lookup(&dir, &path), Entry::default());
+        assert!(read(&dir).files.is_empty());
+    }
+
+    #[test]
+    fn a_file_put_at_the_same_path_is_not_given_the_old_choice() {
+        let dir = directory("replaced-file");
+        let path = file(&dir, "data.csv");
+        remember(&dir, &path, chosen(Some("tab"), None));
+
+        // The same path and length, but a later timestamp: the old choices
+        // were made for the file that was here before this one.
+        std::fs::remove_file(&path).expect("remove the fixture");
+        let replacement = file(&dir, "data.csv");
+        let later = SystemTime::now() + Duration::from_secs(2);
+        std::fs::File::options()
+            .write(true)
+            .open(&replacement)
+            .expect("open the replacement")
+            .set_modified(later)
+            .expect("set a later timestamp");
+
+        assert_eq!(lookup(&dir, &path), Entry::default());
     }
 
     #[test]
@@ -219,6 +541,24 @@ mod tests {
         remember(&dir, &path, chosen(None, Some("windows-1252")));
 
         assert_eq!(lookup(&dir, &path), chosen(None, Some("windows-1252")));
+    }
+
+    #[test]
+    fn an_entry_without_a_file_state_is_not_trusted() {
+        let dir = directory("legacy");
+        let path = file(&dir, "data.csv");
+        let mut store = Store::default();
+        store.files.insert(
+            key(&path),
+            Stored {
+                entry: chosen(Some("semicolon"), None),
+                stamp: None,
+            },
+        );
+        write(&dir, &store).expect("write an old-style entry");
+
+        assert_eq!(lookup(&dir, &path), Entry::default());
+        assert!(read(&dir).files.is_empty());
     }
 
     #[test]
@@ -252,7 +592,10 @@ mod tests {
 
         let auto = resolve(Dialect::default(), &remembered, false);
         assert_eq!(auto.delimiter, Some(Delimiter::Semicolon));
-        assert_eq!(auto.encoding, Some(Encoding::Windows1252));
+        assert_eq!(
+            auto.encoding,
+            Some(Encoding::Legacy(encoding_rs::WINDOWS_1252))
+        );
 
         let partial = resolve(
             Dialect::from_labels(None, Some("utf-8")).unwrap(),

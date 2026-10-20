@@ -25,10 +25,17 @@ calamine = { version = "0.36.1", features = ["dates"] }
 # from the package and rendered here; `ssfmt` implements Excel's format-code
 # grammar, including its sections, bracket currency and date tokens.
 ssfmt = "0.1.2"
-# Decoding a delimited file in the encoding the user picks. Already in the tree
+# Decoding a delimited file in the encoding it is read with. Already in the tree
 # through reqwest, so this adds no compiled code; a CSV from a Windows tool is
 # Windows-1252 far more often than it is valid UTF-8.
 encoding_rs = "0.8"
+# Working out which legacy encoding a file that is not UTF-8 is in. A file's
+# bytes are all that say this, and the answer decides every character in the
+# grid: Windows-1252 read as Shift_JIS is a wall of mojibake. `chardetng` is
+# the detector Firefox uses, and it names the Japanese, Chinese and Korean
+# encodings and the single-byte code pages rather than only the Western one.
+# It depends on `encoding_rs`, `memchr` and `cfg-if`, all already in the tree.
+chardetng = "1.0"
 # Already in the tree via calamine; used directly to read the style parts of a
 # package, which calamine does not expose.
 quick-xml = "0.41"

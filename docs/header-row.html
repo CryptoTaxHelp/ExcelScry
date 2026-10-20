@@ -18,11 +18,18 @@
     <em>generated</em> line — so <strong>Header row</strong> says
     <strong>3</strong>, and the strip at the top holds
     <strong>Region</strong>, <strong>Product</strong>, <strong>Units</strong>
-    and the rest, with row number <strong>3</strong> beside them and row&nbsp;12
-    starting underneath. Naming another row in the field moves the pin; so does
-    clicking that row's number in the margin, which is how a header found by
-    eye is chosen. Clearing the field, or clicking the chosen number again,
-    leaves nothing pinned. (Shown in the UI harness, which serves this front end
-    against mocked rows.)
+    and the rest, with row number <strong>3</strong> beside them and the rows
+    below scrolling underneath. That row is also what labels the columns: the
+    strip along the top of the grid reads <strong>Region</strong> and
+    <strong>Product</strong> rather than <strong>A</strong> and
+    <strong>B</strong>, and a long name is cut with an ellipsis while its
+    tooltip keeps the whole text. Naming another row in the field relabels the
+    columns as well; clicking that row's number in the margin does the same,
+    which is how a header found by eye is chosen. Clearing the field, or clicking the chosen number again,
+    leaves nothing pinned. The row is remembered for the file, so reopening it
+    holds the same row above the grid — and a file left unpinned reopens
+    unpinned rather than growing a header back. (Shown in the UI harness, which
+    serves this front end against mocked rows and keeps the row in its own store
+    the way the app keeps it in <code>text-dialects.json</code>.)
   </figcaption>
 </figure>

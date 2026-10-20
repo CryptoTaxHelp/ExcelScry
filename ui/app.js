@@ -50,6 +50,9 @@ const geom = {
   ys: new Float64Array(1),
   anchors: new Map(),
   covered: new Map(),
+  /** Rows and columns the sheet hides, as `[first, last]` runs, in order. */
+  hiddenRowRuns: [],
+  hiddenColRuns: [],
 };
 /** Coverage beyond this is not remembered; the anchor still draws its span. */
 const MAX_MERGE_COVERAGE = 200_000;
@@ -91,14 +94,22 @@ const rowAtY = (y) => clamp(indexAt(geom.ys, y), 0, Math.max(geom.rows - 1, 0));
  * order; walking it alongside the axis keeps this linear in rows plus
  * overrides, which matters on a sheet with a million rows.
  */
-function fillAxis(edges, count, sizes, fallback) {
+function fillAxis(edges, count, sizes, fallback, collapsed = null) {
   let next = 0;
+  let run = 0;
   for (let index = 0; index < count; index += 1) {
     while (next < sizes.length && sizes[next][0] < index) next += 1;
     let size = fallback;
     if (next < sizes.length && sizes[next][0] === index) {
       const value = sizes[next][1];
       if (Number.isFinite(value) && value > 0) size = value;
+    }
+    // A hidden row or column takes no space, as it does in the sheet, so the
+    // ones after it start where it did. Revealing them lays them back out.
+    // The runs are sorted, so one walk covers the whole axis.
+    if (collapsed) {
+      while (run < collapsed.length && collapsed[run][1] < index) run += 1;
+      if (run < collapsed.length && index >= collapsed[run][0]) size = 0;
     }
     edges[index + 1] = edges[index] + size;
   }
@@ -148,10 +159,18 @@ const state = {
   /** The text table's header, pinned above the grid while the rest scrolls.
    *  Zero-based; `null` pins nothing. */
   headerRow: null,
+  /** Whether the rows and columns the sheet hides are shown in place, marked,
+   *  instead of collapsed. Reset whenever another file or sheet is opened. */
+  showHidden: false,
+  /** The column a delimited table is ordered by, if any: `{ col, descending,
+   *  label }`. A view of the rows, cleared when another file is opened. */
+  sort: null,
 };
 
 const els = {
   welcome: document.getElementById("welcome"),
+  welcomeRecent: document.getElementById("welcome-recent"),
+  welcomeRecentList: document.getElementById("welcome-recent-list"),
   viewer: document.getElementById("viewer"),
   dropOverlay: document.getElementById("drop-overlay"),
   cols: document.getElementById("cols"),
@@ -162,6 +181,7 @@ const els = {
   readoutRef: document.getElementById("readout-ref"),
   readoutKind: document.getElementById("readout-kind"),
   readoutValue: document.getElementById("readout-value"),
+  readoutFormula: document.getElementById("readout-formula"),
   statusFile: document.getElementById("status-file"),
   statusSheet: document.getElementById("status-sheet"),
   statusCells: document.getElementById("status-cells"),
@@ -189,6 +209,7 @@ const els = {
   btnOpen2: document.getElementById("btn-open-2"),
   btnExport: document.getElementById("btn-export"),
   btnReload: document.getElementById("btn-reload"),
+  btnHidden: document.getElementById("btn-hidden"),
   btnSettings: document.getElementById("btn-settings"),
   settings: document.getElementById("settings"),
   textbar: document.getElementById("textbar"),
@@ -197,6 +218,7 @@ const els = {
   textHeader: document.getElementById("text-header"),
   textDetected: document.getElementById("text-detected"),
   textHint: document.getElementById("text-hint"),
+  btnSaveUtf8: document.getElementById("btn-save-utf8"),
   frozenViewport: document.getElementById("frozen-viewport"),
   frozen: document.getElementById("frozen"),
   frozenCorner: document.getElementById("frozen-corner"),
@@ -221,6 +243,125 @@ const ESCAPES = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&
 const esc = (value) => String(value).replace(/[&<>"']/g, (ch) => ESCAPES[ch]);
 
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
+
+/**
+ * A formula as it is shown: one `=` at the front, no ODF namespace.
+ *
+ * The same cell can come from an `.xlsx` (`SUM(B2:B3)`) or an ODS
+ * (`of:=SUM([.B2:.B3])`), and the grid should not care which. Only the display
+ * is normalised — what the export writes is the reader's own text.
+ */
+function formulaText(raw) {
+  const text = String(raw === null || raw === undefined ? "" : raw).trim();
+  if (!text) return "";
+  const bare = text.replace(/^(?:of|oooc|msoxl):=/, "");
+  return bare.startsWith("=") ? bare : `=${bare}`;
+}
+
+/**
+ * What a column's head says: the header cell's text, or the letter.
+ *
+ * A delimited file's columns have names, and they are the row pinned as its
+ * header — `Region`, `Product`, `Units` instead of A, B, C. A workbook keeps
+ * the letters: its rows are data, not a table with a header. An empty cell, a
+ * column past the header's own width and a tile still on its way all fall back
+ * to the letter, the last of them until the render that brings the tile.
+ */
+function columnLabel(col) {
+  const header = pinnedRow();
+  if (header === null) return columnName(col);
+  const cell = cellAt(header, col);
+  if (!cell) return columnName(col);
+  const text = String(cell[1]).replace(/\s+/g, " ").trim();
+  return text || columnName(col);
+}
+
+/**
+ * One column's head, as markup.
+ *
+ * A named column is left-aligned and cut with an ellipsis: a header like
+ * `Region` is not the three-character letter the strip was built for, and the
+ * title still carries the whole name and the letter it stands in for.
+ */
+function colHeadMarkup(col) {
+  // A collapsed column has no width to hold a letter, and drawing one would
+  // stack every hidden letter on the seam.
+  if (collapsedCol(col)) return "";
+  const active = col === state.selection.col ? " is-active" : "";
+  const letter = columnName(col);
+  const label = columnLabel(col);
+  const named = label !== letter;
+  // A revealed column is one the file hides, so it is marked as such: dimmed
+  // and struck through rather than looking like an ordinary column.
+  const hidden = runAt(geom.hiddenColRuns, col) !== null ? " is-hidden-axis" : "";
+  // A delimited table's named column is a sort control: its name orders the
+  // records by that column, and a second press reverses the order the first
+  // one gave. A workbook keeps its letters, and its rows are not a record list.
+  const sortable = named && isTextTable() && !hidden;
+  const sorted = Boolean(sortable && state.sort && state.sort.col === col);
+  const descending = sorted && state.sort.descending;
+  const arrow = sorted
+    ? `<span class="colhead-sort" aria-hidden="true">${descending ? "▾" : "▴"}</span>`
+    : "";
+  const title = hidden
+    ? ` title="Column ${esc(letter)} is hidden in the file"`
+    : sorted
+      ? ` title="Sorted by ${esc(label)}, ${descending ? "descending" : "ascending"} — click to reverse"`
+      : sortable
+        ? ` title="Sort by ${esc(label)}"`
+        : named
+          ? ` title="${esc(label)} (column ${letter})"`
+          : "";
+  const sortAttr = sortable ? ` data-sort="${col}"` : "";
+  const sortClass = sortable ? " is-sortable" : "";
+  const sortedClass = sorted ? (descending ? " is-sorted is-descending" : " is-sorted") : "";
+  return `<div class="colhead${active}${named ? " is-named" : ""}${hidden}${sortClass}${sortedClass}"${sortAttr}${title} style="left:${
+    geom.xs[col]
+  }px;width:${colWidth(col)}px"><span class="colhead-label">${esc(label)}</span>${arrow}</div>`;
+}
+
+/**
+ * The collapsed marker for each run of hidden rows or columns in view.
+ *
+ * A hidden run takes no space, so what is left is the seam between its
+ * neighbours: a thin bar in the number or letter strip, with the count and a
+ * hint that clicking it brings the rows or columns back. That is the quickest
+ * way to reveal one run without showing every hidden thing in the sheet.
+ */
+function seamMarkup(runs, axis, view) {
+  if (state.showHidden || runs.length === 0) return "";
+  const parts = [];
+  const startOf = axis === "row" ? (index) => geom.ys[index] : (index) => geom.xs[index];
+  const scroll = axis === "row" ? view.scrollTop : view.scrollLeft;
+  const extent = axis === "row" ? els.body.clientHeight : els.body.clientWidth;
+  const inView = runsInView(
+    runs,
+    startOf,
+    (run) => startOf(run[1] + 1) - startOf(run[0]),
+    scroll - 1,
+    scroll + extent
+  );
+  for (const [first, last] of inView) {
+    const count = last - first + 1;
+    const start = startOf(first);
+    const what = count === 1 ? (axis === "row" ? "row" : "column") : axis === "row" ? "rows" : "columns";
+    const from = axis === "row" ? String(first + 1) : columnName(first);
+    const to = axis === "row" ? String(last + 1) : columnName(last);
+    const where = count === 1 ? `at ${from}` : `${from}–${to}`;
+    const title = `${count} ${what} hidden ${where} — click to show ${count === 1 ? "it" : "them"}`;
+    const run = `${first}:${last}`;
+    parts.push(
+      axis === "row"
+        ? `<div class="rowhead is-seam" data-seam="row" data-run="${run}" title="${esc(
+            title
+          )}" style="top:${Math.max(0, start - 1)}px;height:3px"></div>`
+        : `<div class="colhead is-seam" data-seam="col" data-run="${run}" title="${esc(
+            title
+          )}" style="left:${Math.max(0, start - 1)}px;width:3px"></div>`
+    );
+  }
+  return parts.join("");
+}
 
 /** 0 -> A, 25 -> Z, 26 -> AA */
 function columnName(index) {
@@ -271,6 +412,7 @@ function setBusy(busy, message) {
   els.btnOpen2.disabled = busy;
   els.btnExport.disabled = busy || !state.info;
   els.btnReload.disabled = busy || !state.info;
+  els.btnSaveUtf8.disabled = busy || !canSaveUtf8();
   document.body.style.cursor = busy ? "progress" : "";
   if (message) flash(message);
 }
@@ -282,6 +424,9 @@ function setBusy(busy, message) {
 const currentSheet = () => (state.info ? state.info.sheets[state.sheet] : null);
 /** A delimited text table: a record can be pinned as its header. */
 const isTextTable = () => Boolean(state.info && state.info.text);
+/** The encoding was not UTF-8, so a UTF-8 copy is worth offering. */
+const canSaveUtf8 = () =>
+  Boolean(state.info && state.info.text && state.info.text.encoding !== "UTF-8");
 const realRows = () => (currentSheet() ? currentSheet().rows : 0);
 const realCols = () => (currentSheet() ? currentSheet().cols : 0);
 /** The row pinned above the grid: the chosen header, if it still exists. */
@@ -319,6 +464,106 @@ function frozenSize(freeze = frozenCounts()) {
 }
 
 /**
+ * The rows and columns the sheet hides, and the runs they come in.
+ *
+ * A sheet can hide a column of workings or a block of rows, and the grid
+ * collapses them as the sheet's author left them: a report reads as it does in
+ * Excel rather than as a wall of detail. The runs are kept because a seam is
+ * drawn at each one and because the selection has to step over them.
+ */
+const hiddenRowRunsOf = () =>
+  currentSheet() && Array.isArray(currentSheet().hiddenRowRuns)
+    ? currentSheet().hiddenRowRuns
+    : [];
+const hiddenColRunsOf = () =>
+  currentSheet() && Array.isArray(currentSheet().hiddenColRuns)
+    ? currentSheet().hiddenColRuns
+    : [];
+
+/** How many rows or columns a list of runs stands for. */
+const runCount = (runs) => runs.reduce((sum, [first, last]) => sum + last - first + 1, 0);
+
+/** The runs, clamped to the sheet the grid is drawing. */
+function boundedRuns(runs, limit) {
+  const out = [];
+  for (const run of runs) {
+    if (!Array.isArray(run) || run.length !== 2) continue;
+    const first = Number(run[0]);
+    const last = Number(run[1]);
+    if (!Number.isInteger(first) || !Number.isInteger(last)) continue;
+    if (last < 0 || first >= limit) continue;
+    const start = Math.max(0, first);
+    const end = Math.min(limit - 1, last);
+    if (end >= start) out.push([start, end]);
+  }
+  return out;
+}
+
+/** True when the sheet hides this row or column and it is not being shown. */
+const collapsedRow = (row) => !state.showHidden && runAt(geom.hiddenRowRuns, row) !== null;
+const collapsedCol = (col) => !state.showHidden && runAt(geom.hiddenColRuns, col) !== null;
+
+/** The run `index` belongs to, or null when that row or column is visible. */
+function runAt(runs, index) {
+  let lo = 0;
+  let hi = runs.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const [first, last] = runs[mid];
+    if (index < first) hi = mid - 1;
+    else if (index > last) lo = mid + 1;
+    else return runs[mid];
+  }
+  return null;
+}
+
+/**
+ * The runs that can touch a band of one axis, from `from` to `to`.
+ *
+ * A binary search finds where the band starts, then the walk stops once the
+ * runs begin past its end: a sheet that hides most of its rows costs one pair
+ * per render, not one per hidden row.
+ */
+function runsInView(runs, startOf, sizeOf, from, to) {
+  let lo = 0;
+  let hi = runs.length - 1;
+  let index = 0;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (startOf(runs[mid][0]) <= from) {
+      index = mid + 1;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  // One run can start above the band and reach into it.
+  while (index > 0 && startOf(runs[index - 1][0]) + sizeOf(runs[index - 1]) >= from) index -= 1;
+  const found = [];
+  for (; index < runs.length; index += 1) {
+    if (startOf(runs[index][0]) > to) break;
+    found.push(runs[index]);
+  }
+  return found;
+}
+
+/**
+ * The nearest visible position, looking in `direction` first.
+ *
+ * A pointer and the clamping of a selection look forward — the next visible
+ * cell is the one the pointer would have hit — while an arrow key looks the
+ * way it is travelling, so moving up into a collapsed run lands above it
+ * rather than jumping over it and back down.
+ */
+function visibleIndex(runs, index, limit, direction = 1) {
+  const run = runAt(runs, index);
+  if (!run) return index;
+  if (direction < 0 && run[0] > 0) return run[0] - 1;
+  if (run[1] + 1 < limit) return run[1] + 1;
+  return Math.max(0, run[0] - 1);
+}
+
+/**
  * Lay the sheet out from its own column widths, row heights and merges.
  *
  * A sheet that says nothing about its geometry keeps this app's uniform
@@ -338,10 +583,15 @@ function rebuildGeometry() {
     ? sheet.defaultRowHeight
     : ROW_H;
 
+  // A hidden row or column is collapsed unless the grid is showing what the
+  // sheet hides; revealed, it keeps the size the sheet gave it.
+  const hiddenColRuns = boundedRuns(hiddenColRunsOf(), cols);
+  const hiddenRowRuns = boundedRuns(hiddenRowRunsOf(), rows);
+
   const xs = new Float64Array(cols + 1);
   const ys = new Float64Array(rows + 1);
-  fillAxis(xs, cols, widths, defaultCol);
-  fillAxis(ys, rows, heights, defaultRow);
+  fillAxis(xs, cols, widths, defaultCol, state.showHidden ? null : hiddenColRuns);
+  fillAxis(ys, rows, heights, defaultRow, state.showHidden ? null : hiddenRowRuns);
   // A browser cannot scroll past ~33 million pixels: beyond that the
   // scrollbar lies about where it is. A sheet that tall is scaled down as a
   // whole (keeping every cell's share) rather than becoming unreachable.
@@ -354,6 +604,8 @@ function rebuildGeometry() {
   geom.ys = ys;
   geom.anchors.clear();
   geom.covered.clear();
+  geom.hiddenColRuns = hiddenColRuns;
+  geom.hiddenRowRuns = hiddenRowRuns;
 
   let covered = 0;
   for (const merge of sheet && sheet.merges ? sheet.merges : []) {
@@ -374,6 +626,95 @@ function rebuildGeometry() {
   }
 }
 
+/**
+ * Show what the sheet hides, or collapse it again.
+ *
+ * The sheet's own choice is the default — a hidden column of workings stays
+ * hidden when the file opens — and revealing is only a view: nothing is
+ * written back, and what is shown is still marked as hidden.
+ */
+function setShowHidden(on) {
+  if (state.showHidden === on) return;
+  state.showHidden = on;
+  rebuildGeometry();
+  layoutSheet();
+  updateHiddenButton();
+  // The selection may have been sitting on a row that is now collapsed away.
+  const { row, col } = state.selection;
+  const nextRow = visibleIndex(geom.hiddenRowRuns, row, realRows());
+  const nextCol = visibleIndex(geom.hiddenColRuns, col, realCols());
+  if (nextRow !== row || nextCol !== col) select(nextRow, nextCol);
+  else scheduleRender();
+  flash(
+    on
+      ? "Showing the rows and columns this sheet hides."
+      : "Hidden rows and columns are collapsed again."
+  );
+}
+
+/**
+ * Order a delimited table's records by one of its named columns.
+ *
+ * The Rust side sorts the rows in memory, below the pinned header, so every
+ * other field travels with the record it belongs to and a title or note above
+ * the header keeps its place. The file on disk is untouched: this is the order
+ * of the view, and a reload reads the rows back as the file has them.
+ *
+ * Pressing the same column again reverses what the first press gave. Pressing a
+ * different one starts over, ascending, rather than carrying the previous
+ * direction to a column nobody asked to reverse.
+ */
+async function sortByColumn(col) {
+  if (!isTextTable() || state.busy) return;
+  const header = pinnedRow();
+  if (header === null) return;
+  const same = Boolean(state.sort && state.sort.col === col);
+  const descending = same && !state.sort.descending;
+  const label = columnLabel(col);
+  try {
+    await invoke("sort_text_rows", {
+      sheet: state.sheet,
+      headerRow: header,
+      column: col,
+      descending,
+    });
+  } catch (err) {
+    flash(String(err), true);
+    return;
+  }
+  state.sort = { col, descending, label };
+  // The rows themselves moved, so every cached tile is stale and the grid has
+  // to ask for them again. The geometry stays: a row keeps its height, and the
+  // header is still the row the header was pinned to.
+  resetTiles();
+  scheduleRender();
+  updateStatus();
+  flash(`Sorted by ${label}, ${descending ? "descending" : "ascending"}.`);
+}
+
+const plural = (count, word) =>
+  `${count.toLocaleString()} ${word}${count === 1 ? "" : "s"}`;
+
+/** The toolbar control that offers the hidden rows and columns, when there are
+ *  any; a sheet that hides nothing has no button to wonder about. */
+function updateHiddenButton() {
+  const rows = runCount(hiddenRowRunsOf());
+  const cols = runCount(hiddenColRunsOf());
+  els.btnHidden.hidden = rows === 0 && cols === 0;
+  if (rows === 0 && cols === 0) return;
+  els.btnHidden.classList.toggle("is-on", state.showHidden);
+  const count =
+    rows && cols
+      ? `${plural(rows, "row")} and ${plural(cols, "column")}`
+      : rows
+        ? plural(rows, "row")
+        : plural(cols, "column");
+  els.btnHidden.textContent = state.showHidden ? "Hide them again" : `Show ${count}`;
+  els.btnHidden.title = state.showHidden
+    ? "Collapse the rows and columns this sheet hides"
+    : `This sheet hides ${count}; show them in place`;
+}
+
 const tileKey = (tr, tc) => `${tr}:${tc}`;
 const maxTileRow = () => Math.max(0, Math.ceil(realRows() / TILE_ROWS) - 1);
 const maxTileCol = () => Math.max(0, Math.ceil(realCols() / TILE_COLS) - 1);
@@ -385,7 +726,12 @@ function resetTiles() {
   state.generation += 1;
 }
 
-/** Returns [kind, display], null for a known-empty cell, undefined if unknown. */
+/**
+ * Returns [kind, display, look, hidden, formula], null for a known-empty cell,
+ * undefined if unknown. `hidden` is the value the cell holds but its number
+ * format shows nothing for, which the grid marks so it is not read as empty;
+ * `formula` is what the file calculates the cell from, when it calculates it.
+ */
 function cellAt(row, col) {
   const tr = Math.floor(row / TILE_ROWS);
   const tc = Math.floor(col / TILE_COLS);
@@ -538,13 +884,9 @@ function render() {
 
   const colParts = [];
   for (let col = view.firstCol; col < view.lastCol; col++) {
-    const active = col === state.selection.col ? " is-active" : "";
-    colParts.push(
-      `<div class="colhead${active}" style="left:${geom.xs[col]}px;width:${colWidth(
-        col
-      )}px">${columnName(col)}</div>`
-    );
+    colParts.push(colHeadMarkup(col));
   }
+  colParts.push(seamMarkup(geom.hiddenColRuns, "col", view));
 
   // The header row is named in the strip, so "which row is pinned" can be
   // answered without scrolling to it, and a click on any number moves the pin.
@@ -552,19 +894,26 @@ function render() {
   const pinHint = isTextTable() ? ' title="Click to pin this row as the header"' : "";
   const rowParts = [];
   for (let row = view.firstRow; row < view.lastRow; row++) {
+    // A collapsed row has no height to hold a number; the seam below stands
+    // in for the run it belongs to.
+    if (collapsedRow(row)) continue;
     const active = row === state.selection.row ? " is-active" : "";
     const pinned = row === header;
-    const title = pinned
-      ? ' title="Header row — click to unpin it"'
-      : isTextTable()
-        ? pinHint
-        : "";
+    const revealed = runAt(geom.hiddenRowRuns, row) !== null ? " is-hidden-axis" : "";
+    const title = revealed
+      ? ` title="Row ${row + 1} is hidden in the file"`
+      : pinned
+        ? ' title="Header row — click to unpin it"'
+        : isTextTable()
+          ? pinHint
+          : "";
     rowParts.push(
-      `<div class="rowhead${active}${pinned ? " is-pinned" : ""}"${title} data-row="${row}" style="top:${
+      `<div class="rowhead${active}${pinned ? " is-pinned" : ""}${revealed}"${title} data-row="${row}" style="top:${
         geom.ys[row]
       }px;height:${rowHeight(row)}px">${row + 1}</div>`
     );
   }
+  rowParts.push(seamMarkup(geom.hiddenRowRuns, "row", view));
 
   els.cols.innerHTML = colParts.join("");
   els.rows.innerHTML = rowParts.join("");
@@ -575,6 +924,8 @@ function render() {
       cellParts.push(cellMarkup(cellAt(row, col), row, col));
     }
   }
+
+  cellParts.push(hiddenBandMarkup(view));
 
   const box = selectionBox();
   cellParts.push(
@@ -587,6 +938,30 @@ function render() {
 }
 
 /**
+ * The inline CSS for a cell's workbook style.
+ *
+ * A look only carries what the file sets, so a fill-only cell keeps the grid's
+ * semantic text colour and a bold header keeps its weight when it has some
+ * other styling. Colours are checked again here even though the Rust side
+ * normalises them: nothing from a workbook is interpolated into markup raw.
+ */
+const LOOK_COLOUR = /^#[0-9a-f]{6}$/i;
+const lookColour = (value) =>
+  typeof value === "string" && LOOK_COLOUR.test(value) ? value : "";
+
+function lookStyle(look) {
+  if (!look) return "";
+  const css = [];
+  if (look.bold) css.push("font-weight:700");
+  if (look.italic) css.push("font-style:italic");
+  const color = lookColour(look.color);
+  if (color) css.push(`color:${color}`);
+  const background = lookColour(look.background);
+  if (background) css.push(`background:${background}`);
+  return css.length ? `;${css.join(";")}` : "";
+}
+
+/**
  * One cell as markup: a pending block, nothing for an empty, or the value.
  *
  * A merged region is drawn once, from its anchor, at the size of the whole
@@ -595,6 +970,9 @@ function render() {
  * centred in a row the sheet made taller.
  */
 function cellMarkup(cell, row, col, maxBottom = Infinity, topOffset = 0) {
+  // A collapsed row or column has no space of its own; its cells would be a
+  // zero-width pile at the seam.
+  if (collapsedRow(row) || collapsedCol(col)) return "";
   const merge = mergeAt(row, col);
   if (!merge && mergeOrigin(row, col)) return "";
 
@@ -617,9 +995,67 @@ function cellMarkup(cell, row, col, maxBottom = Infinity, topOffset = 0) {
   }
   if (cell === null) return "";
   const text = cell[1];
-  if (text === "") return "";
-  const title = text.length > 24 ? ` title="${esc(text)}"` : "";
-  return `<div class="cell k-${cell[0]}"${title} style="${box}">${esc(text)}</div>`;
+  const look = cell[2];
+  // A format can render a value as nothing (`#,##0;-#,##0;` for a zero). Such
+  // a cell has no text to draw, so it keeps its box and gets a corner mark.
+  const hidden = cell[3] || "";
+  const formula = formulaText(cell[4]);
+  if (text === "" && !look && !hidden && !formula) return "";
+  // The tooltip carries what the cell does not show: the formula behind it,
+  // the value its format hides, or the tail of text the column cut off.
+  const tips = [];
+  if (formula) tips.push(formula);
+  if (hidden) tips.push(`Hidden by its number format: ${hidden}`);
+  else if (text.length > 24) tips.push(text);
+  const title = tips.length ? ` title="${esc(tips.join("  ·  "))}"` : "";
+  const style = `${box}${lookStyle(look)}`;
+  const kind = `cell k-${cell[0]}${hidden ? " is-hidden" : ""}${formula ? " has-formula" : ""}`;
+  return `<div class="${kind}"${title} style="${style}">${esc(text)}</div>`;
+}
+
+/**
+ * The wash over a revealed hidden row or column.
+ *
+ * Showing what the sheet hides is not the same as unhiding it: the rows and
+ * columns are still hidden in the file, so they are laid out where they belong
+ * under a translucent wash, with their number or letter struck through. The
+ * frozen panes are left alone — their headers still carry the mark, and a
+ * frozen band is not where a hidden row usually lives.
+ */
+function hiddenBandMarkup(view) {
+  if (!state.showHidden) return "";
+  const parts = [];
+  const width = geom.xs[geom.cols];
+  const height = geom.ys[geom.rows];
+  const rowsInView = runsInView(
+    geom.hiddenRowRuns,
+    (row) => geom.ys[row],
+    (run) => geom.ys[run[1] + 1] - geom.ys[run[0]],
+    view.scrollTop,
+    view.scrollTop + els.body.clientHeight
+  );
+  for (const [first, last] of rowsInView) {
+    const top = geom.ys[first];
+    const size = geom.ys[last + 1] - top;
+    parts.push(
+      `<div class="hidden-band is-row-band" style="top:${top}px;height:${size}px;width:${width}px"></div>`
+    );
+  }
+  const colsInView = runsInView(
+    geom.hiddenColRuns,
+    (col) => geom.xs[col],
+    (run) => geom.xs[run[1] + 1] - geom.xs[run[0]],
+    view.scrollLeft,
+    view.scrollLeft + els.body.clientWidth
+  );
+  for (const [first, last] of colsInView) {
+    const left = geom.xs[first];
+    const size = geom.xs[last + 1] - left;
+    parts.push(
+      `<div class="hidden-band is-col-band" style="left:${left}px;width:${size}px;height:${height}px"></div>`
+    );
+  }
+  return parts.join("");
 }
 
 /**
@@ -682,17 +1118,11 @@ function paneSelection() {
 /** Column letters and row numbers for the frozen bands. */
 function renderFreezeHeaders(freeze) {
   const activeRow = state.selection.row;
-  const activeCol = state.selection.col;
 
   const colParts = [];
   const lastCol = Math.min(freeze.cols, colAtX(els.body.clientWidth) + 1);
   for (let col = 0; col < lastCol; col++) {
-    const active = col === activeCol ? " is-active" : "";
-    colParts.push(
-      `<div class="colhead${active}" style="left:${geom.xs[col]}px;width:${colWidth(
-        col
-      )}px">${columnName(col)}</div>`
-    );
+    colParts.push(colHeadMarkup(col));
   }
   els.freezeColsHead.innerHTML = colParts.join("");
 
@@ -822,6 +1252,48 @@ function layoutSheet() {
 // Selection
 // --------------------------------------------------------------------------
 
+/**
+ * Where the grid is, to be put back when the file is opened again.
+ *
+ * The store is written when the moving stops: a write per arrow key would be a
+ * write per keypress. Opening, switching sheets and scrolling all end up here,
+ * and the Rust side stores it against the file that is open, so what is saved
+ * is always this file's position. A failure is not worth a message — the file
+ * is still open, and the next move tries again.
+ */
+let viewSaveTimer = 0;
+
+function scheduleViewSave() {
+  if (!state.info || state.busy) return;
+  window.clearTimeout(viewSaveTimer);
+  viewSaveTimer = window.setTimeout(() => {
+    viewSaveTimer = 0;
+    saveView();
+  }, 250);
+}
+
+/**
+ * Write a position that is still waiting, before the file it belongs to stops
+ * being the one that is open.
+ */
+function flushViewSave() {
+  if (!viewSaveTimer) return;
+  window.clearTimeout(viewSaveTimer);
+  viewSaveTimer = 0;
+  saveView();
+}
+
+function saveView() {
+  if (!state.info) return;
+  invoke("remember_view", {
+    sheet: state.sheet,
+    row: state.selection.row,
+    col: state.selection.col,
+    top: els.body.scrollTop,
+    left: els.body.scrollLeft,
+  }).catch(() => {});
+}
+
 function select(row, col, { scrollIntoView = false } = {}) {
   // Every cell of a merged region is the same cell: selecting a covered one
   // selects the region's anchor, so the readout and the outline agree.
@@ -830,8 +1302,18 @@ function select(row, col, { scrollIntoView = false } = {}) {
     row = origin.row;
     col = origin.col;
   }
-  state.selection.row = clamp(row, 0, Math.max(realRows() - 1, 0));
-  state.selection.col = clamp(col, 0, Math.max(realCols() - 1, 0));
+  // A collapsed row or column cannot hold the selection: nothing would be
+  // outlined and the readout would describe a cell that is not on screen. The
+  // nearest visible one is taken instead, which is what the pointer and the
+  // arrow keys would have hit anyway.
+  let targetRow = clamp(row, 0, Math.max(realRows() - 1, 0));
+  let targetCol = clamp(col, 0, Math.max(realCols() - 1, 0));
+  if (!state.showHidden) {
+    targetRow = visibleIndex(geom.hiddenRowRuns, targetRow, realRows());
+    targetCol = visibleIndex(geom.hiddenColRuns, targetCol, realCols());
+  }
+  state.selection.row = targetRow;
+  state.selection.col = targetCol;
   updateReadout();
 
   if (scrollIntoView) {
@@ -856,6 +1338,7 @@ function select(row, col, { scrollIntoView = false } = {}) {
         body.scrollTop = box.top + box.height - body.clientHeight;
     }
   }
+  scheduleViewSave();
   scheduleRender();
 }
 
@@ -887,29 +1370,52 @@ function scrollFromPane(event) {
   if (event.deltaX || event.deltaY) event.preventDefault();
 }
 
+/** The formula the readout shows, or nothing for a cell that is not calculated. */
+function showReadoutFormula(formula) {
+  els.readoutFormula.textContent = formula;
+  els.readoutFormula.title = formula ? `Formula: ${formula}` : "";
+  els.readoutFormula.hidden = !formula;
+}
+
 function updateReadout() {
   const { row, col } = state.selection;
   els.readoutRef.textContent = `${columnName(col)}${row + 1}`;
+  els.readoutValue.classList.remove("is-hidden-value");
+  els.readoutValue.title = "";
   const cell = cellAt(row, col);
   if (cell === undefined) {
     els.readoutKind.textContent = "";
     els.readoutValue.textContent = "…";
+    showReadoutFormula("");
     return;
   }
-  if (cell === null) {
+  // A calculated cell says what it is calculated from; a typed-in one does not.
+  showReadoutFormula(cell === null ? "" : formulaText(cell[4]));
+  if (cell === null || cell[0] === "z") {
     els.readoutKind.textContent = "empty";
     els.readoutValue.textContent = "";
     return;
   }
-  els.readoutKind.textContent = KIND_LABEL[cell[0]] || "";
-  els.readoutValue.textContent = cell[1];
+  const hidden = cell[3];
+  els.readoutKind.textContent = hidden
+    ? `${KIND_LABEL[cell[0]] || "value"} · hidden`
+    : KIND_LABEL[cell[0]] || "";
+  // The grid shows what the cell's format shows; when that is nothing, the
+  // readout is the one place the value behind the blank can be read.
+  els.readoutValue.textContent = hidden || cell[1];
+  if (hidden) {
+    els.readoutValue.classList.add("is-hidden-value");
+    els.readoutValue.title = "The number format shows nothing for this value";
+  }
 }
 
 function copySelection() {
   const { row, col } = state.selection;
   const cell = cellAt(row, col);
   if (!cell) return;
-  const text = cell[1];
+  // A hidden value is what copying the cell gives in Excel too, and the
+  // readout has already shown it: copying the blank would lose the number.
+  const text = cell[3] || cell[1];
   const done = () => flash(`Copied ${columnName(col)}${row + 1}`);
 
   if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -953,7 +1459,42 @@ function headerAfterOpen(info, previous) {
   if (!info.text) return null;
   if (previous === null) return null;
   const rows = info.sheets.length ? info.sheets[0].rows : 0;
-  return Number.isInteger(previous) && previous < rows ? previous : 0;
+  // A file opened on its own uses the row chosen for it before: absent means
+  // nobody chose one, so the first record pins; null that the file was left
+  // unpinned; a number a row. A re-read keeps whatever is pinned now, because
+  // the choice belongs to the open file and a re-read is not a new one.
+  const remembered = "headerRow" in info.text ? info.text.headerRow : 0;
+  const candidate = Number.isInteger(previous) ? previous : remembered;
+  if (candidate === null) return null;
+  return Number.isInteger(candidate) && candidate < rows ? candidate : 0;
+}
+
+/**
+ * Put the files the Rust side remembers on the welcome screen.
+ *
+ * The path is data from disk, so both the visible text and the attribute the
+ * click reads go through `esc`. The backend has already dropped entries whose
+ * files are gone; a failure here simply leaves the screen without the list.
+ */
+async function refreshRecent() {
+  try {
+    const files = await invoke("recent_files");
+    const items = Array.isArray(files)
+      ? files.filter((file) => file && typeof file.path === "string" && file.path)
+      : [];
+    els.welcomeRecent.hidden = !items.length;
+    els.welcomeRecentList.innerHTML = items
+      .map(
+        (file) =>
+          `<li><button class="recent-file" type="button" data-path="${esc(file.path)}">` +
+          `<span class="recent-name">${esc(file.name || file.path)}</span>` +
+          `<span class="recent-path">${esc(file.path)}</span></button></li>`
+      )
+      .join("");
+  } catch {
+    els.welcomeRecent.hidden = true;
+    els.welcomeRecentList.innerHTML = "";
+  }
 }
 
 /**
@@ -965,6 +1506,9 @@ function headerAfterOpen(info, previous) {
  */
 async function openPath(path, dialect = { delimiter: "", encoding: "" }, { explicit = false } = {}) {
   if (!path) return;
+  // A move that has not been written yet still belongs to the file that is
+  // open now, not to the one about to replace it.
+  flushViewSave();
   setBusy(true, "Reading…");
   // Captured before the await: a second open of the same file must not read
   // the state the first one is about to replace.
@@ -986,11 +1530,24 @@ async function openPath(path, dialect = { delimiter: "", encoding: "" }, { expli
         state.text.delimiter = info.text.delimiter;
       }
       if (!state.text.encoding && info.text.encodingChosen) {
-        state.text.encoding = ENCODING_VALUES[info.text.encoding] || "";
+        state.text.encoding = encodingValue(info.text.encoding);
       }
     }
     state.headerRow = headerAfterOpen(info, previousHeader);
-    state.sheet = 0;
+    // A file reopens on the sheet it was left on, when the workbook still has
+    // that sheet: a tab removed since would otherwise reopen nothing.
+    const viewed = info.view || null;
+    state.sheet =
+      viewed &&
+      Number.isInteger(viewed.sheet) &&
+      viewed.sheet >= 0 &&
+      viewed.sheet < info.sheets.length
+        ? viewed.sheet
+        : 0;
+    // Another file, another set of hidden rows and its own order: the view
+    // starts collapsed and unsorted.
+    state.showHidden = false;
+    state.sort = null;
     resetTiles();
     state.selection.row = 0;
     state.selection.col = 0;
@@ -1003,8 +1560,17 @@ async function openPath(path, dialect = { delimiter: "", encoding: "" }, { expli
     buildTabs();
     rebuildGeometry();
     layoutSheet();
+    // The offsets only mean something once the sheet has a height, and the
+    // remembered cell is selected without scrolling to it: the offset is where
+    // the reader was looking, not a place to move them away from.
+    if (viewed) {
+      els.body.scrollTop = Number.isFinite(viewed.top) ? viewed.top : 0;
+      els.body.scrollLeft = Number.isFinite(viewed.left) ? viewed.left : 0;
+      select(viewed.row || 0, viewed.col || 0);
+    }
     updateStatus();
     updateTextBar();
+    updateHiddenButton();
     updateReadout();
     scheduleRender();
 
@@ -1024,6 +1590,8 @@ async function openPath(path, dialect = { delimiter: "", encoding: "" }, { expli
     }
   } catch (err) {
     flash(String(err), true);
+    // A recent path can point at a file that has gone since the list was made.
+    if (!els.welcome.hidden) refreshRecent();
   } finally {
     setBusy(false);
   }
@@ -1045,6 +1613,8 @@ async function chooseFile() {
 }
 
 function closeWorkbook() {
+  // A position still waiting to be written belongs to the file being closed.
+  flushViewSave();
   state.info = null;
   state.text = { delimiter: "", encoding: "" };
   state.headerRow = null;
@@ -1068,6 +1638,7 @@ function closeWorkbook() {
   els.welcome.hidden = false;
   els.cells.innerHTML = "";
   updateStatus();
+  refreshRecent();
   setBusy(false);
 }
 
@@ -1113,6 +1684,10 @@ function buildTabs() {
 function setSheet(index) {
   if (!state.info || index === state.sheet) return;
   state.sheet = index;
+  // Each sheet decides for itself what it hides; the view starts collapsed and
+  // in the file's own order.
+  state.showHidden = false;
+  state.sort = null;
   resetTiles();
   state.selection.row = 0;
   state.selection.col = 0;
@@ -1122,7 +1697,11 @@ function setSheet(index) {
   rebuildGeometry();
   layoutSheet();
   updateStatus();
+  updateHiddenButton();
   updateReadout();
+  // Another sheet is another position for this file: it is remembered too, so
+  // closing here reopens on the sheet that was in front.
+  scheduleViewSave();
   scheduleRender();
 }
 
@@ -1149,6 +1728,11 @@ function updateStatus() {
   if (sheet && sheet.firstUsedRow) {
     bits.push(`data starts at row ${(sheet.firstUsedRow + 1).toLocaleString()}`);
   }
+  if (state.sort && isTextTable()) {
+    bits.push(
+      `sorted by ${state.sort.label}, ${state.sort.descending ? "descending" : "ascending"}`
+    );
+  }
   els.statusCells.textContent = bits.join("  ·  ");
 }
 
@@ -1156,13 +1740,27 @@ function updateStatus() {
 // Delimited text: the delimiter and the encoding, which a file cannot say
 // --------------------------------------------------------------------------
 
-/** The select value for an encoding name the Rust side reports. */
-const ENCODING_VALUES = {
-  "UTF-8": "utf-8",
-  "Windows-1252": "windows-1252",
-  "UTF-16 LE": "utf-16le",
-  "UTF-16 BE": "utf-16be",
-};
+/**
+ * The select value for an encoding name the Rust side reports.
+ *
+ * The bar reports the name a person reads — `UTF-16 LE`, `Shift_JIS`, `GBK` —
+ * and the select holds the name the backend accepts (`utf-16le`, `shift_jis`,
+ * `gbk`). Comparing letters and digits alone matches the two spellings without
+ * a table that would fall out of step with the options; a name the picker does
+ * not list leaves the select on Auto, which is where a re-read starts from.
+ */
+function encodingValue(label) {
+  const key = String(label || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+  if (!key) return "";
+  const option = [...els.textEncoding.options].find(
+    (candidate) =>
+      candidate.value &&
+      candidate.value.toLowerCase().replace(/[^a-z0-9]/g, "") === key
+  );
+  return option ? option.value : "";
+}
 
 /**
  * Show or hide the text bar, and say what the open file was read with.
@@ -1181,8 +1779,12 @@ function updateTextBar() {
     els.textHint.hidden = true;
     els.textHeader.value = "";
     els.textHeader.disabled = true;
+    els.btnSaveUtf8.hidden = true;
+    els.btnSaveUtf8.disabled = true;
     return;
   }
+  els.btnSaveUtf8.hidden = text.encoding === "UTF-8";
+  els.btnSaveUtf8.disabled = state.busy || !canSaveUtf8();
   els.textDelimiter.value = state.text.delimiter;
   els.textEncoding.value = state.text.encoding;
   const row = pinnedRow();
@@ -1194,6 +1796,25 @@ function updateTextBar() {
   els.textHint.textContent = text.undecodable
     ? "Some characters did not decode — try another encoding."
     : "";
+}
+
+/**
+ * Save a UTF-8 copy of the open text file, decoded with the encoding it was
+ * read with. The original is left alone; the backend asks for a new name.
+ */
+async function saveUtf8Copy() {
+  if (!canSaveUtf8() || state.busy) return;
+  setBusy(true, "Saving a UTF-8 copy…");
+  try {
+    const summary = await invoke("save_utf8_copy", { destination: null });
+    flash(`Saved a UTF-8 copy (${formatBytes(summary.bytes)}) to ${summary.path}`);
+  } catch (err) {
+    const message = String(err);
+    if (message.includes("cancel")) flash("Save cancelled.");
+    else flash(message, true);
+  } finally {
+    setBusy(false);
+  }
 }
 
 /** Re-read the open text file with the delimiter and encoding now selected. */
@@ -1223,11 +1844,31 @@ function setHeaderRow(row) {
   const rows = realRows();
   const next = Number.isInteger(row) && row >= 0 && row < rows ? row : null;
   state.headerRow = next;
+  // The records start after the header, so an order sorted below the old one
+  // no longer describes what follows: the marker is dropped rather than lying,
+  // and the status bar stops repeating an order the table no longer keeps.
+  if (state.sort) {
+    state.sort = null;
+    updateStatus();
+  }
+  rememberHeader(next);
   updateTextBar();
   layoutSheet();
   scheduleRender();
   if (next === null) flash("Header unpinned.");
   else flash(`Row ${(next + 1).toLocaleString()} is the header, pinned while the rest scrolls.`);
+}
+
+/**
+ * Tell the backend which row is now the header, so the file reopens with it.
+ *
+ * Moving the pin is a view change, not a re-read, so this is its own call. The
+ * store is a convenience: a failure leaves this session with the same header
+ * and only loses it next time.
+ */
+function rememberHeader(row) {
+  if (!isTextTable() || !state.info || !state.info.path) return;
+  invoke("remember_header", { row }).catch(() => {});
 }
 
 /** Take the header row from the bar's field: empty unpins it. */
@@ -1773,6 +2414,11 @@ async function installUpdate() {
 function initEvents() {
   els.btnOpen.addEventListener("click", chooseFile);
   els.btnOpen2.addEventListener("click", chooseFile);
+  els.welcomeRecentList.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-path]");
+    if (!button || state.busy) return;
+    openPath(button.dataset.path);
+  });
   els.btnExport.addEventListener("click", exportOds);
   // Reload keeps the text dialect: re-reading the file should not silently
   // undo the delimiter and encoding the user picked for it.
@@ -1831,16 +2477,49 @@ function initEvents() {
   els.textDelimiter.addEventListener("change", applyTextDialect);
   els.textEncoding.addEventListener("change", applyTextDialect);
   els.textHeader.addEventListener("change", applyHeaderInput);
+  els.btnSaveUtf8.addEventListener("click", saveUtf8Copy);
   // Any row number can be the header: pointing at the row is how a table with
   // a title above its column names is fixed. Clicking the pin again releases it.
+  // A seam stands where a hidden run was collapsed away: clicking it shows the
+  // rows or columns the sheet hides, which is quicker than hunting for them.
+  const revealSeam = (seam, axis) => {
+    const first = Number(String(seam.dataset.run).split(":")[0]);
+    setShowHidden(true);
+    // Land on the run that was clicked rather than wherever the view was.
+    if (!Number.isInteger(first)) return;
+    if (axis === "row") select(first, state.selection.col, { scrollIntoView: true });
+    else select(state.selection.row, first, { scrollIntoView: true });
+  };
   els.rows.addEventListener("click", (event) => {
+    const seam = event.target.closest("[data-seam]");
+    if (seam) {
+      revealSeam(seam, "row");
+      return;
+    }
     const head = event.target.closest(".rowhead");
     if (!head || !isTextTable()) return;
     const row = Number(head.dataset.row);
     setHeaderRow(row === state.headerRow ? null : row);
   });
+  els.cols.addEventListener("click", (event) => {
+    const seam = event.target.closest("[data-seam]");
+    if (seam) {
+      revealSeam(seam, "col");
+      return;
+    }
+    const head = event.target.closest("[data-sort]");
+    if (head) sortByColumn(Number(head.dataset.sort));
+  });
+  els.btnHidden.addEventListener("click", () => setShowHidden(!state.showHidden));
 
-  els.body.addEventListener("scroll", scheduleRender, { passive: true });
+  els.body.addEventListener(
+    "scroll",
+    () => {
+      scheduleRender();
+      scheduleViewSave();
+    },
+    { passive: true }
+  );
   window.addEventListener("resize", () => {
     layoutSheet();
     scheduleRender();
@@ -1952,11 +2631,18 @@ function onKeyDown(event) {
   const move = movements[event.key];
   if (!move) return;
   event.preventDefault();
+  // A collapsed run is stepped over in the direction of travel, so an arrow
+  // key never lands on a row that is not on screen.
+  if (!state.showHidden) {
+    move[0] = visibleIndex(geom.hiddenRowRuns, move[0], realRows(), Math.sign(move[0] - row) || 1);
+    move[1] = visibleIndex(geom.hiddenColRuns, move[1], realCols(), Math.sign(move[1] - col) || 1);
+  }
   select(move[0], move[1], { scrollIntoView: true });
 }
 
 async function init() {
   initEvents();
+  await refreshRecent();
   try {
     const path = await invoke("initial_file");
     if (path) await openPath(path);

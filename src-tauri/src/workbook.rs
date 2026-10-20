@@ -13,7 +13,7 @@ use calamine::{open_workbook_auto, Data, Error as CalamineError, Reader};
 use chrono::{Duration, NaiveTime};
 
 use crate::cell_styles;
-use crate::model::{Cell, LoadedWorkbook, SheetData, SheetLayout};
+use crate::model::{Cell, LoadedWorkbook, SheetData, SheetFormulas, SheetLayout, SheetLooks};
 use crate::sheet_layout;
 use crate::text_table;
 use crate::trust::{self, TrustReport};
@@ -142,14 +142,47 @@ pub fn load_with(path: &Path, dialect: text_table::Dialect) -> Result<LoadedWork
 
         let layout = layouts.remove(name).unwrap_or_default();
         cols = cover_merges(&mut rows, cols, &layout);
+        let sheet_looks = looks.remove(name).unwrap_or_default();
+        cols = cover_looks(&mut rows, cols, &sheet_looks);
+
+        // Formulas are what make an exported report recalculable, so they are
+        // kept for the ODS writer. Reading them costs a second pass over the
+        // sheet, which is not worth paying for a sheet whose values did not
+        // fit, and each formula is charged to the same budget as a cell: a
+        // sheet of a million formulas would otherwise cost more memory than
+        // the values they computed. A reader without formulas simply says so,
+        // and the sheet is exported as the values it already has.
+        let mut formulas = SheetFormulas::default();
+        if !sheet_truncated && budget > 0 {
+            if let Ok(chain) = book.worksheet_formula(name) {
+                let (formula_row, formula_col) = chain.start().unwrap_or((0, 0));
+                for (rel_row, rel_col, text) in chain.used_cells() {
+                    if text.trim().is_empty() {
+                        continue;
+                    }
+                    if budget == 0 {
+                        truncated = true;
+                        break;
+                    }
+                    let row = formula_row as usize + rel_row;
+                    let col = formula_col as usize + rel_col;
+                    if row >= MAX_ROWS || col >= MAX_COLS {
+                        continue;
+                    }
+                    formulas.insert(row, col, text.clone());
+                    budget -= 1;
+                }
+            }
+        }
 
         sheets.push(SheetData {
             name: name.clone(),
             rows,
             cols,
             formats: formats.remove(name).unwrap_or_default(),
-            looks: looks.remove(name).unwrap_or_default(),
+            looks: sheet_looks,
             layout,
+            formulas,
         });
 
         if sheet_truncated {
@@ -162,6 +195,7 @@ pub fn load_with(path: &Path, dialect: text_table::Dialect) -> Result<LoadedWork
                     formats: Default::default(),
                     looks: Default::default(),
                     layout: Default::default(),
+                    formulas: Default::default(),
                 });
             }
             break;
@@ -424,6 +458,22 @@ fn cover_merges(rows: &mut Vec<Vec<Cell>>, cols: usize, layout: &SheetLayout) ->
     cols
 }
 
+/// Extend the sheet to its furthest styled cell.
+///
+/// A fill on a blank cell draws part of the table even when no value reaches
+/// that row or column, so the grid has to be at least that large. The rows are
+/// empty vectors, not materialised cells; the cell budget is untouched.
+fn cover_looks(rows: &mut Vec<Vec<Cell>>, cols: usize, looks: &SheetLooks) -> usize {
+    let Some((last_row, last_col)) = looks.extent() else {
+        return cols;
+    };
+    let styled_rows = (last_row + 1).min(MAX_ROWS);
+    if styled_rows > rows.len() {
+        rows.resize(styled_rows, Vec::new());
+    }
+    cols.max((last_col + 1).min(MAX_COLS))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -606,7 +656,7 @@ mod tests {
         let page = wb.page(sheet, row, 1, col, 1).expect("the sheet exists");
         page.rows[0][0]
             .as_ref()
-            .map(|(_, text)| text.clone())
+            .map(|(_, text, _, _, _)| text.clone())
             .unwrap_or_default()
     }
 
@@ -660,6 +710,13 @@ mod tests {
             .expect("C6 should carry the total row's look");
         assert!(look.bold, "C6 is bold in the sample");
         assert_eq!(look.background.as_deref(), Some("#DCE6F1"));
+
+        // And the look reaches the page the grid asks for, not only the model.
+        let page = wb.page(0, 5, 1, 2, 1).expect("the sheet exists");
+        let view = page.rows[0][0].as_ref().expect("C6 is not empty");
+        let look = view.2.as_ref().expect("C6 carries its look");
+        assert!(look.bold);
+        assert_eq!(look.background.as_deref(), Some("#DCE6F1"));
     }
 
     #[test]
@@ -678,6 +735,28 @@ mod tests {
         let cols = cover_merges(&mut rows, 1, &layout);
         assert_eq!(cols, 6, "the grid has to reach the merge's far column");
         assert_eq!(rows.len(), 5, "and its last row");
+        assert!(rows.iter().all(Vec::is_empty));
+    }
+
+    #[test]
+    fn a_styled_blank_extends_the_sheet() {
+        use crate::model::{CellLook, SheetLooks};
+        use std::sync::Arc;
+
+        let mut rows = vec![Vec::new()];
+        let mut looks = SheetLooks::default();
+        looks.insert(
+            3,
+            4,
+            Arc::new(CellLook {
+                background: Some("#DDEEFF".into()),
+                ..CellLook::default()
+            }),
+        );
+
+        let cols = cover_looks(&mut rows, 1, &looks);
+        assert_eq!(cols, 5, "the grid has to reach the fill's far column");
+        assert_eq!(rows.len(), 4, "and its last row");
         assert!(rows.iter().all(Vec::is_empty));
     }
 
@@ -741,6 +820,93 @@ mod tests {
             &Cell::Text("backordered, with a comma".into())
         );
         assert_eq!(shown(&wb, 0, 1, 3), "19.99");
+    }
+
+    /// A minimal xlsx package: one sheet whose B column is calculated, with
+    /// the filled-down range Excel writes as a shared formula.
+    fn workbook_with_formulas(name: &str) -> std::path::PathBuf {
+        use std::io::Write;
+
+        const CONTENT_TYPES: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+</Types>"#;
+
+        const ROOT_RELS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"#;
+
+        const WORKBOOK: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets><sheet name="Report" sheetId="1" r:id="rId1"/></sheets>
+</workbook>"#;
+
+        const WORKBOOK_RELS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+</Relationships>"#;
+
+        const SHEET: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>
+  <row r="1"><c r="A1" t="inlineStr"><is><t>Region</t></is></c><c r="B1" t="inlineStr"><is><t>Qty</t></is></c></row>
+  <row r="2"><c r="A2" t="inlineStr"><is><t>North</t></is></c><c r="B2"><f t="shared" ref="B2:B4" si="0">A2*10</f><v>20</v></c></row>
+  <row r="3"><c r="A3" t="inlineStr"><is><t>South</t></is></c><c r="B3"><f t="shared" si="0"/><v>30</v></c></row>
+  <row r="4"><c r="A4" t="inlineStr"><is><t>Sum</t></is></c><c r="B4"><f>SUM(B2:B3)</f><v>50</v></c></row>
+</sheetData></worksheet>"#;
+
+        let dir = std::env::temp_dir().join("excelscry-formula-tests");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        let _ = fs::remove_file(&path);
+        let file = fs::File::create(&path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        for (part, body) in [
+            ("[Content_Types].xml", CONTENT_TYPES),
+            ("_rels/.rels", ROOT_RELS),
+            ("xl/workbook.xml", WORKBOOK),
+            ("xl/_rels/workbook.xml.rels", WORKBOOK_RELS),
+            ("xl/worksheets/sheet1.xml", SHEET),
+        ] {
+            zip.start_file(part, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(body.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+        path
+    }
+
+    #[test]
+    fn formulas_are_read_beside_the_values_they_computed() {
+        let path = workbook_with_formulas("formulas.xlsx");
+        let wb = load(&path).expect("an xlsx should open");
+        let _ = fs::remove_file(&path);
+
+        let sheet = &wb.sheets[0];
+        // The values are what the grid shows, exactly as before.
+        assert_eq!(sheet.cell(1, 1), &Cell::Float(20.0));
+        assert_eq!(sheet.cell(2, 1), &Cell::Float(30.0));
+
+        // The formulas are kept in Excel's spelling at their true positions,
+        // including the one Excel only stores once as a shared formula.
+        let mut found: Vec<(usize, usize, String)> = sheet
+            .formulas
+            .iter()
+            .map(|(row, col, text)| (row, col, text.to_string()))
+            .collect();
+        found.sort();
+        assert_eq!(
+            found,
+            vec![
+                (1, 1, "A2*10".to_string()),
+                (2, 1, "A3*10".to_string()),
+                (3, 1, "SUM(B2:B3)".to_string()),
+            ],
+            "the sheet's formulas did not come through"
+        );
     }
 
     #[test]

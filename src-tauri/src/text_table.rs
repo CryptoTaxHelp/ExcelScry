@@ -11,8 +11,9 @@
 //! need: a quoted field may contain the delimiter, doubled quotes and line
 //! breaks; `CRLF`, `LF` and `CR` all end a record; a UTF-8 BOM is skipped;
 //! UTF-16 (with a BOM, or recognised by its high zero bytes without one) is
-//! decoded; Windows-1252 is chosen for bytes that are not UTF-8; and rows may be
-//! ragged.
+//! decoded; a file that is not UTF-8 is scored against the legacy encodings a
+//! Windows tool writes, so a Shift_JIS or GBK export opens as its own
+//! characters rather than as mojibake; and rows may be ragged.
 
 use std::fs::{File, Metadata};
 use std::io::{BufRead, BufReader, Cursor, Read, Seek, SeekFrom};
@@ -30,12 +31,24 @@ const MAX_COLS: usize = 16_384;
 /// How much of the first record is inspected when choosing a delimiter.
 const SNIFF_BYTES: usize = 8 * 1024;
 
-/// How much of a file is inspected when choosing an encoding.
+/// How much of a file is read when the encoding has to be worked out.
 ///
-/// The buffer `BufReader` hands over is this size, and a UTF-16 file has a zero
-/// byte beside almost every character, so this is far more than the pattern
-/// needs.
-const ENCODING_SNIFF_BYTES: usize = 8 * 1024;
+/// UTF-8 and UTF-16 are settled by a handful of bytes; a legacy encoding is
+/// settled by statistics, and statistics want text. The more of it the detector
+/// sees, the less often a short or unusual file is attributed to the wrong
+/// alphabet. A prefix is enough — a file's first sixty-four kilobytes name its
+/// language — and it costs one read of a file that is about to be read whole
+/// anyway.
+const DETECT_BYTES: usize = 64 * 1024;
+
+/// How many non-ASCII bytes there must be before the detector is consulted.
+///
+/// One accented letter in an otherwise ASCII file is not enough to choose
+/// between the world's encodings: every single-byte one explains it, so the
+/// statistics answer with whatever their tables happen to favour, which is not
+/// evidence. Below this, the answer stays Windows-1252 — what such a file
+/// almost always is.
+const MIN_DETECT_NON_ASCII: usize = 8;
 
 /// Which delimiter a file's extension asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,14 +118,19 @@ fn delimiter_label(byte: u8) -> &'static str {
 }
 
 /// How to decode a delimited file's bytes.
+///
+/// UTF-8 and UTF-16 are handled here because both have a byte order mark to
+/// honour and neither is a guess once it is recognised. Every other encoding a
+/// file can arrive in — the code pages of Windows, the ISO-8859 series, KOI8,
+/// and the Japanese, Chinese and Korean encodings — is a decoder `encoding_rs`
+/// already has, so it is named rather than reimplemented.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Encoding {
     Utf8,
     Utf16Le,
     Utf16Be,
-    /// What a Western European file that is not UTF-8 usually is, and the
-    /// encoding the web reads an `iso-8859-1` file as.
-    Windows1252,
+    /// Any other encoding `encoding_rs` knows, including Windows-1252.
+    Legacy(&'static encoding_rs::Encoding),
 }
 
 impl Encoding {
@@ -122,25 +140,67 @@ impl Encoding {
             Encoding::Utf8 => "UTF-8",
             Encoding::Utf16Le => "UTF-16 LE",
             Encoding::Utf16Be => "UTF-16 BE",
-            Encoding::Windows1252 => "Windows-1252",
+            Encoding::Legacy(encoding) => pretty_name(encoding),
         }
     }
 
+    /// The encoding a name or a label refers to.
+    ///
+    /// Everything the bar offers and everything the detector can answer is
+    /// accepted, in either spelling: the bar sends `utf-16le` and `gbk`, and a
+    /// person reading the bar sees `UTF-16 LE` and `GBK`.
     pub fn from_label(label: &str) -> Option<Self> {
+        let trimmed = label.trim();
         // The name a person sees (`UTF-16 LE`) and the name the UI sends
         // (`utf-16le`) are both accepted, as separators differ between them.
-        match label
-            .trim()
+        match trimmed
             .to_ascii_lowercase()
             .replace(['_', ' '], "-")
             .as_str()
         {
-            "utf-8" | "utf8" => Some(Encoding::Utf8),
-            "utf-16le" | "utf-16-le" | "utf16le" => Some(Encoding::Utf16Le),
-            "utf-16be" | "utf-16-be" | "utf16be" => Some(Encoding::Utf16Be),
-            "windows-1252" | "cp1252" | "latin1" | "iso-8859-1" => Some(Encoding::Windows1252),
-            _ => None,
+            "utf-8" | "utf8" => return Some(Encoding::Utf8),
+            "utf-16le" | "utf-16-le" | "utf16le" => return Some(Encoding::Utf16Le),
+            "utf-16be" | "utf-16-be" | "utf16be" => return Some(Encoding::Utf16Be),
+            _ => {}
         }
+        // `for_label` knows every label a browser accepts for an encoding:
+        // `windows-1252`, `latin1`, `shift_jis`, `sjis`, `gbk`, `euc-kr`,
+        // `koi8-r` and the rest. It also answers UTF-16 for `utf-16`, so those
+        // three are mapped to the variants that handle their byte order marks.
+        let encoding = encoding_rs::Encoding::for_label(trimmed.as_bytes())?;
+        if encoding == encoding_rs::UTF_8 {
+            Some(Encoding::Utf8)
+        } else if encoding == encoding_rs::UTF_16LE {
+            Some(Encoding::Utf16Le)
+        } else if encoding == encoding_rs::UTF_16BE {
+            Some(Encoding::Utf16Be)
+        } else if encoding == encoding_rs::REPLACEMENT || encoding == encoding_rs::X_USER_DEFINED {
+            // Neither is a text encoding: one throws characters away and the
+            // other is a byte pass-through for scripts.
+            None
+        } else {
+            Some(Encoding::Legacy(encoding))
+        }
+    }
+}
+
+/// The name the bar shows: the encoding's own name, with the Windows code pages
+/// spelled the way the picker spells them.
+fn pretty_name(encoding: &'static encoding_rs::Encoding) -> &'static str {
+    match encoding.name() {
+        "windows-1250" => "Windows-1250",
+        "windows-1251" => "Windows-1251",
+        "windows-1252" => "Windows-1252",
+        "windows-1253" => "Windows-1253",
+        "windows-1254" => "Windows-1254",
+        "windows-1255" => "Windows-1255",
+        "windows-1256" => "Windows-1256",
+        "windows-1257" => "Windows-1257",
+        "windows-1258" => "Windows-1258",
+        "windows-874" => "Windows-874",
+        // Shift_JIS, EUC-JP, ISO-2022-JP, GBK, Big5, EUC-KR, KOI8-U, IBM866 and
+        // the ISO-8859 series are already spelled the way they are written.
+        name => name,
     }
 }
 
@@ -163,7 +223,7 @@ impl Dialect {
         };
         let encoding = match encoding.map(str::trim).filter(|name| !name.is_empty()) {
             Some(name) => Some(Encoding::from_label(name).ok_or_else(|| {
-                format!("Unknown encoding {name:?}. Choose UTF-8, Windows-1252, UTF-16 LE or UTF-16 BE.")
+                format!("Unknown encoding {name:?}. Choose one of the encodings the bar lists.")
             })?),
             None => None,
         };
@@ -198,12 +258,25 @@ pub fn load_with(
     // Whether the encoding was the reader's guess; only a guess may be revised
     // once the bytes are read.
     let auto_encoding = dialect.encoding.is_none();
-    let mut encoding = dialect.encoding.unwrap_or(match byte_order_mark {
-        Some(Bom::Utf16Le) => Encoding::Utf16Le,
-        Some(Bom::Utf16Be) => Encoding::Utf16Be,
-        Some(Bom::Utf8) => Encoding::Utf8,
-        None => detect_encoding(&prefix),
-    });
+    let mut encoding = match dialect.encoding {
+        Some(chosen) => chosen,
+        None => match byte_order_mark {
+            Some(Bom::Utf16Le) => Encoding::Utf16Le,
+            Some(Bom::Utf16Be) => Encoding::Utf16Be,
+            Some(Bom::Utf8) => Encoding::Utf8,
+            None => {
+                // Detection reads past the buffer the prefix came from, so the
+                // reader starts over from the first byte afterwards.
+                let sample = read_sample(&mut reader)
+                    .map_err(|e| format!("Cannot read \"{}\": {e}", path.display()))?;
+                let guess = detect_encoding(&sample, sample.len() < DETECT_BYTES);
+                reader
+                    .seek(SeekFrom::Start(0))
+                    .map_err(|e| format!("Cannot read \"{}\": {e}", path.display()))?;
+                guess
+            }
+        },
+    };
     let delimiter = match dialect.delimiter {
         Some(chosen) => chosen.byte(),
         // `.csv` says comma, but a file written in a locale that uses `;` as
@@ -225,10 +298,10 @@ pub fn load_with(
                 .map_err(|e| format!("Cannot read \"{}\": {e}", path.display()))?;
             if table.undecodable && auto_encoding {
                 // The start of the file looked like UTF-8, but a later field
-                // did not decode. Rather than show replacement characters in
-                // every accented cell, read the whole file as the single-byte
-                // encoding such a file is in, which decodes every byte.
-                encoding = Encoding::Windows1252;
+                // did not decode. The whole file is in memory a moment later,
+                // so the detector can name the encoding that start did not
+                // reveal - a Japanese export whose header is ASCII is the
+                // common case - rather than assuming a Western code page.
                 reader
                     .seek(SeekFrom::Start(0))
                     .map_err(|e| format!("Cannot read \"{}\": {e}", path.display()))?;
@@ -236,6 +309,7 @@ pub fn load_with(
                 reader
                     .read_to_end(&mut bytes)
                     .map_err(|e| format!("Cannot read \"{}\": {e}", path.display()))?;
+                encoding = detect_encoding(&bytes, true);
                 let (text, undecodable) = decode(&bytes, encoding);
                 let table = parse(Cursor::new(text.into_bytes()), delimiter, MAX_CELLS)
                     .map_err(|e| format!("Cannot read \"{}\": {e}", path.display()))?;
@@ -284,6 +358,8 @@ pub fn load_with(
             looks: Default::default(),
             // Text has no column widths, row heights or merges of its own.
             layout: Default::default(),
+            // A delimited file has no formulas either: every cell is a value.
+            formulas: Default::default(),
         }],
         truncated: table.truncated,
         total_cells: MAX_CELLS - table.budget,
@@ -297,6 +373,9 @@ pub fn load_with(
             delimiter_chosen: dialect.delimiter.is_some(),
             encoding_chosen: dialect.encoding.is_some(),
             undecodable,
+            // The row pinned as the header is a choice about the view, kept
+            // per file by `text_prefs`; a fresh parse knows nothing of it.
+            header_row: None,
         }),
     })
 }
@@ -489,18 +568,67 @@ fn bom(prefix: &[u8]) -> Option<Bom> {
 
 /// The encoding a file without a byte order mark is in.
 ///
-/// Two questions settle it, in this order. A UTF-16 file written by a Windows
+/// Three questions settle it, in this order. A UTF-16 file written by a Windows
 /// tool usually has no BOM, but every ASCII character in it has a zero byte on
 /// one side, which is a pattern UTF-8 text and binary data do not share. Failing
-/// that, bytes that are valid UTF-8 are UTF-8; bytes that are not are
-/// Windows-1252, because a Western file that is not UTF-8 almost always is, and
-/// because every byte means something in it, so nothing is lost.
-fn detect_encoding(prefix: &[u8]) -> Encoding {
-    match utf16_without_bom(prefix) {
+/// that, bytes that are valid UTF-8 are UTF-8. Anything else is a legacy
+/// encoding, and which one is a statistical question: the bytes are scored
+/// against the encodings a Windows tool can have written, so a Japanese export
+/// is read as Shift_JIS and a Russian one as windows-1251 rather than both
+/// being read as Windows-1252.
+///
+/// `complete` says whether `sample` is the whole file, or a prefix cut out of a
+/// longer one — the detector treats the end of the stream differently from a
+/// pause in it.
+fn detect_encoding(sample: &[u8], complete: bool) -> Encoding {
+    match utf16_without_bom(sample) {
         Some(encoding) => encoding,
-        None if utf8_prefix(prefix) => Encoding::Utf8,
-        None => Encoding::Windows1252,
+        None => {
+            // An ISO-2022-JP file is 7-bit ASCII: its Japanese lives in escape
+            // sequences, so it is valid UTF-8 and the rule below would keep the
+            // escapes in the cells as text. Only the detector recognises it,
+            // and only if it is asked first.
+            if sample.contains(&0x1B) {
+                let guess = guess_legacy(sample, complete);
+                if guess == encoding_rs::ISO_2022_JP {
+                    return Encoding::Legacy(guess);
+                }
+            }
+            if utf8_prefix(sample) {
+                return Encoding::Utf8;
+            }
+            if non_ascii_bytes(sample) < MIN_DETECT_NON_ASCII {
+                return Encoding::Legacy(encoding_rs::WINDOWS_1252);
+            }
+            Encoding::Legacy(guess_legacy(sample, complete))
+        }
     }
+}
+
+/// How many bytes in a sample are not ASCII.
+fn non_ascii_bytes(sample: &[u8]) -> usize {
+    sample.iter().filter(|byte| **byte >= 0x80).count()
+}
+
+/// Read the bytes an encoding is chosen from.
+fn read_sample<R: Read>(reader: &mut R) -> std::io::Result<Vec<u8>> {
+    let mut sample = Vec::with_capacity(DETECT_BYTES);
+    reader.take(DETECT_BYTES as u64).read_to_end(&mut sample)?;
+    Ok(sample)
+}
+
+/// Score a file's bytes against the legacy encodings, and name the best fit.
+///
+/// The detector weighs each candidate by what it can decode, by the character
+/// pairs that are common in the language the encoding serves, and by the ones
+/// that never occur at all, so a file of Japanese text rules out the Korean and
+/// Chinese encodings rather than merely fitting them less well. UTF-8 is not
+/// offered as an answer: the caller has already established these bytes are not
+/// UTF-8, and "no, really, Windows-1252" is the useful reply.
+fn guess_legacy(sample: &[u8], complete: bool) -> &'static encoding_rs::Encoding {
+    let mut detector = chardetng::EncodingDetector::new(chardetng::Iso2022JpDetection::Allow);
+    detector.feed(sample, complete);
+    detector.guess(None, chardetng::Utf8Detection::Deny)
 }
 
 /// Whether a prefix is UTF-8, allowing its last character to be cut in half.
@@ -526,9 +654,8 @@ fn utf8_prefix(prefix: &[u8]) -> bool {
 /// other byte decodes to control characters instead. Text whose characters
 /// mostly need both bytes (Greek, Cyrillic, CJK) is not recognised here; the
 /// picker is the answer for those.
-fn utf16_without_bom(prefix: &[u8]) -> Option<Encoding> {
-    let window = &prefix[..prefix.len().min(ENCODING_SNIFF_BYTES)];
-    let bytes = &window[..window.len() - window.len() % 2];
+fn utf16_without_bom(sample: &[u8]) -> Option<Encoding> {
+    let bytes = &sample[..sample.len() - sample.len() % 2];
     let pairs = bytes.len() / 2;
     // Two units is enough for the pattern; a header-only file of a few
     // characters should still be recognised, and binary data is rejected by
@@ -571,6 +698,14 @@ fn looks_like_text(text: &str) -> bool {
 
 /// Decode a byte range with an encoding, saying whether anything in it had to
 /// be replaced.
+/// Decode bytes the way a file read with `encoding` was decoded.
+///
+/// The copy writer uses this rather than its own decoder, so a UTF-8 copy is
+/// made from exactly the text the grid showed.
+pub(crate) fn decode_bytes(bytes: &[u8], encoding: Encoding) -> String {
+    decode(bytes, encoding).0
+}
+
 fn decode(bytes: &[u8], encoding: Encoding) -> (String, bool) {
     match encoding {
         Encoding::Utf8 => match std::str::from_utf8(bytes) {
@@ -579,14 +714,16 @@ fn decode(bytes: &[u8], encoding: Encoding) -> (String, bool) {
         },
         Encoding::Utf16Le => decode_utf16(bytes, true),
         Encoding::Utf16Be => decode_utf16(bytes, false),
-        // Windows-1252 maps every byte to a character, so decoding cannot fail.
         // A UTF-8 BOM is stripped: a file that carries one was written by a
         // tool that meant UTF-8, and is being read this way because its bytes
-        // turned out not to be.
-        Encoding::Windows1252 => {
+        // turned out not to be. Single-byte encodings map every byte to a
+        // character, so decoding cannot fail; the multi-byte ones report the
+        // bytes no character sequence explains, which is what the bar's hint is
+        // for.
+        Encoding::Legacy(encoding) => {
             let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
-            let (text, _, _) = encoding_rs::WINDOWS_1252.decode(bytes);
-            (text.into_owned(), false)
+            let (text, replaced) = encoding.decode_without_bom_handling(bytes);
+            (text.into_owned(), replaced)
         }
     }
 }
@@ -945,10 +1082,11 @@ mod tests {
         assert!(utf8_prefix("caf\u{E9}".as_bytes()));
         // Half of `é` at the end of the sniff window is a valid UTF-8 prefix.
         assert!(utf8_prefix(b"caf\xC3"));
-        assert_eq!(detect_encoding(b"caf\xC3"), Encoding::Utf8);
+        assert_eq!(detect_encoding(b"caf\xC3", true), Encoding::Utf8);
         // A byte that cannot start a sequence is a real error, not a cut.
         assert!(!utf8_prefix(b"caf\xC3("));
-        assert_eq!(detect_encoding(b"caf\xC3("), Encoding::Windows1252);
+        const WINDOWS_1252: Encoding = Encoding::Legacy(encoding_rs::WINDOWS_1252);
+        assert_eq!(detect_encoding(b"caf\xC3(", true), WINDOWS_1252);
     }
 
     #[test]
@@ -971,7 +1109,10 @@ mod tests {
             0x87, 0x00, 0x88, 0x00, 0x89, 0x00,
         ];
         assert_eq!(utf16_without_bom(&bytes), None);
-        assert_eq!(detect_encoding(&bytes), Encoding::Windows1252);
+        assert_eq!(
+            detect_encoding(&bytes, true),
+            Encoding::Legacy(encoding_rs::WINDOWS_1252)
+        );
     }
 
     #[test]
@@ -1109,14 +1250,231 @@ mod tests {
         assert_eq!(Encoding::from_label("utf-16le"), Some(Encoding::Utf16Le));
         assert_eq!(
             Encoding::from_label("Windows-1252"),
-            Some(Encoding::Windows1252)
+            Some(Encoding::Legacy(encoding_rs::WINDOWS_1252))
         );
+        // A name from a language the old list never covered, in either
+        // spelling: what the bar sends, and what the bar shows.
+        assert_eq!(
+            Encoding::from_label("shift_jis"),
+            Some(Encoding::Legacy(encoding_rs::SHIFT_JIS))
+        );
+        assert_eq!(
+            Encoding::from_label("Shift_JIS"),
+            Some(Encoding::Legacy(encoding_rs::SHIFT_JIS))
+        );
+        assert_eq!(
+            Encoding::from_label("gbk").map(Encoding::label),
+            Some("GBK")
+        );
+        assert_eq!(
+            Encoding::from_label("utf-16"),
+            Some(Encoding::Utf16Le),
+            "a bare UTF-16 label is the little-endian one"
+        );
+        assert_eq!(Encoding::from_label("replacement"), None);
         assert!(Dialect::from_labels(Some(""), Some(" ")).is_ok());
         assert!(Dialect::from_labels(Some(";"), Some("utf_16le")).is_ok());
         let err = Dialect::from_labels(Some("tilde"), None).unwrap_err();
         assert!(err.contains("Unknown delimiter"), "unexpected: {err}");
         let err = Dialect::from_labels(None, Some("ebcdic")).unwrap_err();
         assert!(err.contains("Unknown encoding"), "unexpected: {err}");
+    }
+
+    /// A file's bytes the way its own encoding wrote them.
+    fn encoded(encoding: &'static encoding_rs::Encoding, text: &str) -> Vec<u8> {
+        let (bytes, _, unmappable) = encoding.encode(text);
+        assert!(
+            !unmappable,
+            "the fixture has to be writable in its encoding"
+        );
+        bytes.into_owned()
+    }
+
+    /// The Japanese, Chinese, Korean and other single-byte exports a Windows
+    /// tool writes when nobody asked for UTF-8, and the name the bar should end
+    /// up showing for each.
+    ///
+    /// Two answers are compatible rather than identical, and are pinned here so
+    /// a change of detector is noticed: KOI8-R text decodes identically in
+    /// KOI8-U, and the Hebrew code page is recognised as the visual ISO-8859-8
+    /// that carries the same letters.
+    fn legacy_samples() -> Vec<(
+        &'static str,
+        &'static encoding_rs::Encoding,
+        &'static str,
+        &'static str,
+    )> {
+        const JA: &str = "商品コード,商品名,単価,数量,備考\nA-1001,りんご,150,12,青森県産の新鮮な果物です\nB-2002,みかん,80,40,愛媛県産の甘い柑橘類\nC-3003,ぶどう,320,8,山梨県産の高級品\nD-4004,もも,280,15,福島県産の贈答用\nE-5005,すいか,1200,3,熊本県産の大玉\nF-6006,いちご,400,20,栃木県産の甘酸っぱい苺\n";
+        const ZH: &str = "商品编号,商品名称,单价,数量,备注\nA-1001,苹果,150,12,山东烟台的新鲜水果\nB-2002,橘子,80,40,湖南常德的甜橙\nC-3003,葡萄,320,8,新疆吐鲁番的无核葡萄\nD-4004,桃子,280,15,北京平谷的鲜桃\nE-5005,西瓜,1200,3,海南岛的大西瓜\nF-6006,草莓,400,20,辽宁丹东的红颜草莓\n";
+        const ZH_TW: &str = "商品編號,商品名稱,單價,數量,備註\nA-1001,蘋果,150,12,山東煙台的新鮮水果\nB-2002,橘子,80,40,湖南常德的甜橙\nC-3003,葡萄,320,8,新疆吐魯番的無核葡萄\nD-4004,桃子,280,15,北京平谷的鮮桃\nE-5005,西瓜,1200,3,海南島的大西瓜\nF-6006,草莓,400,20,遼寧丹東的紅顏草莓\n";
+        const KO: &str = "상품코드,상품명,단가,수량,비고\nA-1001,사과,150,12,경상북도 청송의 신선한 과일\nB-2002,감귤,80,40,제주도에서 온 달콤한 귤\nC-3003,포도,320,8,충청북도 영동의 포도\nD-4004,복숭아,280,15,경기도 이천의 복숭아\nE-5005,수박,1200,3,전라북도 고창의 수박\nF-6006,딸기,400,20,충청남도 논산의 딸기\n";
+        const RU: &str = "Код,Наименование,Цена,Количество,Примечание\nA-1001,Яблоко,150,12,Свежие фрукты из Краснодара\nB-2002,Мандарин,80,40,Сладкие цитрусовые из Сочи\nC-3003,Виноград,320,8,Виноград из Дагестана\nD-4004,Персик,280,15,Персики из Крыма\nE-5005,Арбуз,1200,3,Большой арбуз из Астрахани\nF-6006,Земляника,400,20,Сладкая клубника из Липецка\n";
+        const PL: &str = "Kod,Nazwa,Cena,Ilość,Uwagi\nA-1001,Jabłko,150,12,Świeże owoce z Grójca\nB-2002,Mandarynka,80,40,Słodkie cytrusy z Hiszpanii\nC-3003,Winogrono,320,8,Kiść winogron z Włoch\nD-4004,Brzoskwinia,280,15,Soczysta brzoskwinia z Sandomierza\nE-5005,Arbuz,1200,3,Duży arbuz z Węgier\nF-6006,Truskawka,400,20,Słodka truskawka z Kaszub\n";
+        const EL: &str = "Κωδικός,Όνομα,Τιμή,Ποσότητα,Σχόλια\nA-1001,Μήλο,150,12,Φρέσκα φρούτα από την Πέλλα\nB-2002,Μανταρίνι,80,40,Γλυκά εσπεριδοειδή από την Άρτα\nC-3003,Σταφύλι,320,8,Σταφύλια από τη Νεμέα\nD-4004,Ροδάκινο,280,15,Ροδάκινα από τη Βέροια\nE-5005,Καρπούζι,1200,3,Μεγάλο καρπούζι από την Ηλεία\nF-6006,Φράουλα,400,20,Γλυκές φράουλες από την Καβάλα\n";
+        const HE: &str = "קוד,שם,מחיר,כמות,הערות\nA-1001,תפוח,150,12,פירות טריים מהגליל\nB-2002,מנדרינה,80,40,הדרים מתוקים מהשרון\nC-3003,ענב,320,8,ענבים מכרמיאל\nD-4004,אפרסק,280,15,אפרסקים מהגולן\nE-5005,אבטיח,1200,3,אבטיח גדול מהערבה\nF-6006,תות,400,20,תותים מתוקים מהשרון\n";
+        const AR: &str = "الرمز,الاسم,السعر,الكمية,ملاحظات\nA-1001,تفاح,150,12,فواكه طازجة من لبنان\nB-2002,يوسفي,80,40,حمضيات حلوة من المغرب\nC-3003,عنب,320,8,عنب من تونس\nD-4004,خوخ,280,15,خوخ من سوريا\nE-5005,بطيخ,1200,3,بطيخ كبير من مصر\nF-6006,فراولة,400,20,فراولة حلوة من الأردن\n";
+        vec![
+            ("shift-jis", encoding_rs::SHIFT_JIS, JA, "Shift_JIS"),
+            ("euc-jp", encoding_rs::EUC_JP, JA, "EUC-JP"),
+            ("iso-2022-jp", encoding_rs::ISO_2022_JP, JA, "ISO-2022-JP"),
+            ("gbk", encoding_rs::GBK, ZH, "GBK"),
+            ("big5", encoding_rs::BIG5, ZH_TW, "Big5"),
+            ("euc-kr", encoding_rs::EUC_KR, KO, "EUC-KR"),
+            (
+                "windows-1251",
+                encoding_rs::WINDOWS_1251,
+                RU,
+                "Windows-1251",
+            ),
+            ("koi8-r", encoding_rs::KOI8_R, RU, "KOI8-U"),
+            ("iso-8859-2", encoding_rs::ISO_8859_2, PL, "ISO-8859-2"),
+            (
+                "windows-1253",
+                encoding_rs::WINDOWS_1253,
+                EL,
+                "Windows-1253",
+            ),
+            ("windows-1255", encoding_rs::WINDOWS_1255, HE, "ISO-8859-8"),
+            (
+                "windows-1256",
+                encoding_rs::WINDOWS_1256,
+                AR,
+                "Windows-1256",
+            ),
+        ]
+    }
+
+    #[test]
+    fn a_legacy_file_opens_as_the_characters_it_holds() {
+        for (name, encoding, text, _) in legacy_samples() {
+            let path = temp_file(&format!("{name}.csv"), &encoded(encoding, text));
+            let meta = std::fs::metadata(&path).unwrap();
+            let wb = load(&path, &meta, Kind::Comma).expect("load");
+            let expected: Vec<Vec<String>> = text
+                .lines()
+                .map(|line| line.split(',').map(str::to_owned).collect())
+                .collect();
+            let shown: Vec<Vec<String>> = wb.sheets[0]
+                .rows
+                .iter()
+                .map(|row| row.iter().map(Cell::display).collect())
+                .collect();
+            assert_eq!(shown, expected, "{name} was misread");
+            let info = wb.text.expect("a text table reports its dialect");
+            assert!(!info.undecodable, "{name} should decode completely");
+            assert!(!info.encoding_chosen, "nobody chose it; the bytes said it");
+        }
+    }
+
+    #[test]
+    fn the_bar_names_the_encoding_the_bytes_turned_out_to_be() {
+        for (name, encoding, text, label) in legacy_samples() {
+            let path = temp_file(&format!("named-{name}.csv"), &encoded(encoding, text));
+            let meta = std::fs::metadata(&path).unwrap();
+            let wb = load(&path, &meta, Kind::Comma).expect("load");
+            assert_eq!(wb.text.unwrap().encoding, label, "{name}");
+        }
+    }
+
+    #[test]
+    fn every_encoding_the_bar_offers_is_one_it_can_read_back() {
+        // The picker in ui/index.html, value by value. The bar sends the value
+        // and reads the name back when the file is reopened, so a value the
+        // backend rejects — or one whose name it cannot find again — would leave
+        // the select on Auto and re-read the file with detection instead.
+        for value in [
+            "utf-8",
+            "utf-16le",
+            "utf-16be",
+            "windows-1252",
+            "windows-1250",
+            "iso-8859-2",
+            "iso-8859-4",
+            "windows-1251",
+            "koi8-r",
+            "koi8-u",
+            "iso-8859-5",
+            "ibm866",
+            "windows-1253",
+            "iso-8859-7",
+            "windows-1254",
+            "windows-1255",
+            "iso-8859-8",
+            "windows-1256",
+            "iso-8859-6",
+            "windows-1257",
+            "iso-8859-13",
+            "windows-1258",
+            "windows-874",
+            "shift_jis",
+            "euc-jp",
+            "iso-2022-jp",
+            "gbk",
+            "gb18030",
+            "big5",
+            "euc-kr",
+        ] {
+            let encoding = Encoding::from_label(value)
+                .unwrap_or_else(|| panic!("the bar offers {value}, which is not accepted"));
+            let label = encoding.label();
+            assert_eq!(
+                Encoding::from_label(label),
+                Some(encoding),
+                "{value} does not read back from the name {label:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_handful_of_accented_bytes_is_not_a_language_sample() {
+        // Two bytes a Central European code page explains as well as a Western
+        // one: with this little text there is nothing to choose between them,
+        // so the answer stays the Western default rather than following noise.
+        assert_eq!(
+            detect_encoding(b"a,\x8a\x9a\n", true),
+            Encoding::Legacy(encoding_rs::WINDOWS_1252)
+        );
+    }
+
+    #[test]
+    fn a_chosen_legacy_encoding_is_used_as_chosen() {
+        // Detection finds Shift_JIS on its own here; choosing it explicitly is
+        // how a file the detector gets wrong is read by hand.
+        let (_, encoding, text, _) = legacy_samples()
+            .into_iter()
+            .find(|(name, ..)| *name == "shift-jis")
+            .expect("a Japanese sample");
+        let path = temp_file("chosen-shift-jis.csv", &encoded(encoding, text));
+        let meta = std::fs::metadata(&path).unwrap();
+        let dialect = Dialect::from_labels(Some("comma"), Some("shift_jis")).unwrap();
+        let wb = load_with(&path, &meta, Kind::Comma, dialect).expect("load");
+        assert_eq!(wb.sheets[0].cell(0, 0), &Cell::Text("商品コード".into()));
+        let info = wb.text.expect("a text table reports its dialect");
+        assert_eq!(info.encoding, "Shift_JIS");
+        assert!(info.encoding_chosen);
+        assert!(!info.undecodable);
+    }
+
+    #[test]
+    fn a_cjk_export_whose_header_is_ascii_is_still_read_as_its_own_encoding() {
+        // The inspected prefix is all ASCII, so the first read streams as UTF-8
+        // and only meets the Japanese bytes later. Those bytes are not a reason
+        // to show the file as Western mojibake.
+        let (_, encoding, text, _) = legacy_samples()
+            .into_iter()
+            .find(|(name, ..)| *name == "shift-jis")
+            .expect("a Japanese sample");
+        let mut bytes = vec![b'a'; DETECT_BYTES + 1024];
+        bytes.push(b'\n');
+        bytes.extend_from_slice(&encoded(encoding, text));
+        let path = temp_file("late-japanese.csv", &bytes);
+        let meta = std::fs::metadata(&path).unwrap();
+        let wb = load(&path, &meta, Kind::Comma).expect("load");
+        assert_eq!(wb.sheets[0].cell(1, 0), &Cell::Text("商品コード".into()));
+        let info = wb.text.expect("a text table reports its dialect");
+        assert_eq!(info.encoding, "Shift_JIS");
+        assert!(!info.encoding_chosen);
+        assert!(!info.undecodable);
     }
 
     #[test]

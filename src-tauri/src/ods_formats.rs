@@ -101,6 +101,8 @@ enum Family {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct StyleKey {
     code: Option<String>,
+    /// Whether the cell holds text, which a format's fourth section styles.
+    text: bool,
     bold: bool,
     italic: bool,
     color: Option<String>,
@@ -133,12 +135,14 @@ impl FormatStyles {
         &mut self,
         book: &mut WorkBook,
         format: Option<&NumberFormat>,
+        text_cell: bool,
         look: &CellLook,
         header: bool,
     ) -> Option<CellStyleRef> {
         let bold = look.bold || header;
         let key = StyleKey {
             code: format.map(|format| format.code().to_string()),
+            text: text_cell,
             bold,
             italic: look.italic,
             color: look.color.clone(),
@@ -150,8 +154,9 @@ impl FormatStyles {
 
         let index = self.next;
         self.next += 1;
-        let value = format
-            .and_then(|format| build_value_format(book, format, &format!("scry_value_{index}")));
+        let value = format.and_then(|format| {
+            build_value_format(book, format, &format!("scry_value_{index}"), text_cell)
+        });
 
         let styled = value.is_some()
             || bold
@@ -195,13 +200,26 @@ fn rgb_of(value: &str) -> Option<Rgb<u8>> {
 }
 
 /// Translate one format into a registered ODF value format.
+///
+/// `text_cell` says the cell this style is for holds text, which Excel's fourth
+/// section formats. ODF spells that as a text style, so such a cell gets one
+/// built from the fourth section instead of the numeric style the rest of the
+/// sheet uses.
 fn build_value_format(
     book: &mut WorkBook,
     format: &NumberFormat,
     name: &str,
+    text_cell: bool,
 ) -> Option<ValueFormatRef> {
     let sections = format.sections();
     let positive = sections.first()?;
+    if text_cell {
+        if let Some(section) = sections.get(3) {
+            if let Some(style) = text_section_style(book, section, &format!("{name}_text")) {
+                return Some(style);
+            }
+        }
+    }
     let pieces = translate(positive)?;
     let family = family(&pieces)?;
 
@@ -242,6 +260,32 @@ fn build_value_format(
     )
 }
 
+/// A text style for one cell, built from a format's fourth section.
+///
+/// `number:text-content` is where the cell's own text goes, and the section's
+/// literals go around it. A section with no placeholder (`"n/a"` for any text)
+/// is all literal, and an empty one shows nothing at all.
+fn text_section_style(
+    book: &mut WorkBook,
+    section: &Section,
+    name: &str,
+) -> Option<ValueFormatRef> {
+    let pieces = translate(section)?;
+    let pieces = if pieces.is_empty() {
+        vec![Piece::Text(String::new())]
+    } else {
+        pieces
+    };
+    build_family(
+        book,
+        &pieces,
+        &Family::Text,
+        name,
+        &[],
+        section_colour(section),
+    )
+}
+
 /// Register a section that a `style:map` selects, if ODF can use it.
 fn mapped_section(
     book: &mut WorkBook,
@@ -252,7 +296,18 @@ fn mapped_section(
 ) -> Option<ValueStyleMap> {
     let pieces = translate(section)?;
     if pieces.is_empty() {
-        return None;
+        // An empty section shows nothing: Excel's way of hiding a value, as
+        // `#,##0;-#,##0;` hides zeros. ODF has no blank data style, so the map
+        // points at a style of the same kind that renders an empty string.
+        build_family(
+            book,
+            &[Piece::Text(String::new())],
+            positive,
+            name,
+            &[],
+            section_colour(section),
+        )?;
+        return Some(ValueStyleMap::new(condition, name));
     }
     let mut family = family(&pieces)?;
     // A literal-only section (`"-"` for zero) borrows the positive family:

@@ -9,6 +9,241 @@ those entries into a version section and tags the commit that holds it.
 
 ## [Unreleased]
 
+### Added
+
+- **Every file reopens where it was left.** A report is rarely read from its
+  first row, and getting back to the place meant scrolling there again. The
+  grid now keeps, per file, the sheet that was in front, the cell that was
+  selected and the scroll offset, and puts all three back when the file is
+  opened again — a workbook comes back on the tab that was in front, with that
+  tab's own position, and the cell the readout names is the one that was
+  selected. The position is written a moment after the moving stops rather than
+  on every keypress, and a move still waiting when another file is opened is
+  written first, against the file it belongs to. Each entry records the file's
+  length and modification time beside the position, so a different export put
+  at the same path opens at its own top instead of inheriting a row that meant
+  something in the file that used to be there. An unreadable store is ignored
+  and the file opens at A1 as it would have.
+
+- **A delimited file's rows can be ordered by one of its columns.** A CSV
+  arrives in whatever order the last export wrote it in, and reading it meant
+  scanning down a column by eye. Clicking a named column's head in the strip
+  now sorts the records by that column; clicking it again reverses the order,
+  and the head keeps an arrow saying which one is showing. A record is a row,
+  so every other field travels with it — sorting by `Units` keeps each product
+  beside its own figure. Numbers compare as numbers (`9` before `10`), text
+  compares without regard to case with the exact text breaking a tie so the
+  order is stable, and a blank field sorts last whichever direction is asked
+  for, as a spreadsheet does. The pinned header and anything above it keep
+  their places, so an export with a title or a note still reads as a document,
+  and a `#,##0`-style grouped figure stays text rather than being guessed at.
+  This is a view of the rows, not an edit: the file on disk is never written
+  and a reload reads the records back as they are, while the status bar says
+  what order the table is in. A workbook is refused — its rows are a layout,
+  not a list of records — and its column heads stay plain letters.
+
+- **A calculated cell shows the formula behind its value.** A workbook stores a
+  formula beside the value it last produced, and the grid showed only that
+  value, so a total nobody could check read exactly like a number somebody
+  typed. Cells the file calculates now carry a small triangle in their
+  bottom-right corner — the hidden-value dot keeps the top-right — hovering one
+  names its formula, and selecting one writes that formula beside the value in
+  the readout, monospaced and dimmed: `G7`, `$16,431.78`, then `=D7*E7`. The
+  text is normalised for display only — Excel's `D7*E7` and an ODS's
+  `of:=D7*E7` both read `=D7*E7` — while what the export writes stays exactly
+  what the reader returned. A cell whose formula came with no cached value is
+  no longer dropped as empty: it reaches the grid, marked and named, because
+  the file does calculate it.
+
+- **A sheet's hidden rows and columns are collapsed in the grid, and can be
+  shown again.** A report that hides a column of workings or a block of detail
+  rows opened with them in place, reading as unexplained blanks and pushing
+  everything after them along, so the sheet on screen was not the sheet its
+  author laid out. The grid now collapses each hidden run where the sheet
+  left it, and the strip keeps a seam there — a thin bar where the run was,
+  counting what it hides on hover and laying it back out when clicked. The
+  toolbar offers the whole sheet at once (*Show 3 rows and 1 column*, then
+  *Hide them again*): revealed rows and columns are drawn where they belong
+  under a striped wash with their number or letter struck through, because
+  showing them is a view and the file still hides them. Moving with the arrow
+  keys or the pointer steps over a collapsed run in the direction of travel
+  instead of landing on a cell that is not on screen, opening another file or
+  switching sheets returns to the sheet's own choice, and the hidden state
+  that reaches the grid travels as runs — adjacent positions joined — so a
+  sheet that hides the rest of its thousand rows is one pair rather than a
+  thousand positions.
+
+- **A cell whose number format hides its value is marked, not shown as
+  empty.** `#,##0;-#,##0;` blanks a zero in Excel, and the grid drew that cell
+  exactly like an empty one, so a report's rolled-up total read as a cell that
+  had never been filled: nothing said whether a blank was zero, text, or
+  nothing at all. A cell the format renders as nothing is now sent with the
+  value it holds beside its kind, text and look, and the grid marks it with a
+  corner dot while leaving the sheet itself unaltered — the tooltip reads
+  *Hidden by its number format: 0*, and the readout names the type and the
+  value behind the blank (`NUMBER · HIDDEN`, the `0` greyed) instead of saying
+  `empty`. A cell holding an empty string is not marked, since there is
+  nothing behind it to hide, and neither is a cell the format leaves visible.
+  Hidden text gets the same mark, so a four-section code that hides text is
+  visible as such rather than as an empty cell.
+
+- **A format's hidden zero and its fourth (text) section survive the ODS
+  export.** `#,##0;-#,##0;` blanked its zeros in the grid, but an export wrote
+  them back as ordinary numbers, and `0.00;[Red]-0.00;0.00;"T: "@` lost the
+  label it puts in front of text: the translator read only the sections ODF
+  spells directly and dropped what it could not express. An empty section is
+  now written as a data style of the positive section's own kind whose content
+  is empty text, selected by the same `value()=0` (or `value()<0`) `style:map`
+  a literal section uses — so a zero stays blank on reopen, while a percentage
+  or currency hidden this way is not turned into a plain number on the way. The
+  fourth section becomes a `number:text-style` beside the numeric one, with
+  `number:text-content` where `@` stood, and only text cells point at it, so a
+  label lands on the text and the numbers beside it keep their digits; a
+  fourth section with no `@` (`0;0;0;"n/a"`) is all literal and shows that
+  literal for any text, and an empty fourth section (`0;;;`) hides text.
+  Reading is wider too: a data style with no parts at all is now kept when a
+  `style:map` selects it, which is exactly how Calc writes a hidden zero, so
+  such an `.ods` no longer comes back with the value unhidden, and a text style
+  with no parts reads as `;;;` — text shown as nothing — rather than as `@`,
+  which had put the hidden text back on screen.
+
+- **A delimited file's columns are labelled with its header row.** The strip
+  above the grid said A, B, C even when the file itself named its columns, so
+  reading a report meant pairing each letter with a name from a row that had
+  scrolled away. The column heads now carry the pinned header row's text —
+  `Region`, `Product`, `Units` — left-aligned and cut with an ellipsis where a
+  name is wider than its column, with the whole name and the letter it replaced
+  in the tooltip. A column whose header cell is empty keeps its letter, as does
+  one whose tile has not arrived yet; unpinning the header puts every letter
+  back, and a workbook is untouched: its rows are data, not a table with a
+  header. Moving the pin relabels the strip immediately, including when it is
+  moved by clicking a row number.
+- **A delimited file's header row is remembered between sessions.** Choosing
+  row 3 as the header of a report with a title and a note above its column
+  names worked until the file was closed, and then the file came back with its
+  first record pinned. The row now lives in `text-dialects.json` beside the
+  file's delimiter and encoding, written whenever the pin changes — the bar
+  calls a new `remember_header` command, so moving the pin stays a view change
+  rather than a re-read — and reported to the UI as `headerRow` on open. An
+  unpinned file is stored as a choice of "no header", so a headerless export
+  reopens headerless instead of growing a header back; a dialect change keeps
+  the row, and an edited or replaced file drops it along with the rest of the
+  entry. A stored row the file no longer has is ignored rather than pinned past
+  the end.
+- **A delimited file in a non-Western encoding opens as its own text.** A
+  `.csv`/`.tsv` that is not UTF-8 used to be read as Windows-1252, which turned
+  every Japanese, Chinese, Korean, Cyrillic, Greek or Hebrew export into
+  mojibake until the encoding was chosen by hand — and there was no way to
+  choose those encodings at all. The bytes the file is read with are now
+  settled statistically from its first sixty-four kilobytes (via `chardetng`,
+  the detector Firefox uses), so Shift_JIS, EUC-JP, ISO-2022-JP, GBK, Big5,
+  EUC-KR, the Windows code pages `1250`–`1258` and `874`, ISO-8859-2, -4, -5,
+  -6, -7, -8 and -13, KOI8-U and IBM866 are each recognised and named on the
+  bar, and a file whose header is ASCII and whose text is not is still found:
+  the whole-file fallback that runs when a field fails to decode now asks the
+  detector too. UTF-8 and UTF-16 keep their exact rules, and a file with fewer
+  than eight non-ASCII bytes stays Windows-1252 rather than following noise.
+  The bar's encoding picker now lists all of them, grouped by script, and
+  choosing one re-reads the file with it and is remembered as before.
+- **A delimited file read in a legacy encoding can be saved back out as
+  UTF-8.** Opening a Windows-1252 export shows the right accented names, but
+  every tool downstream still had to guess the bytes. The text bar now offers
+  *Save a copy as UTF-8* whenever the file was not read as UTF-8; it writes a
+  copy through the same decoder the grid used, so the characters on screen are
+  the characters written, while the quoting, delimiter and line endings stay
+  exactly as the source had them. No byte order mark is added, the chosen name
+  is prefilled as `<name>-utf8.<ext>`, and the original is never touched — the
+  backend refuses a destination that resolves to the same file. The button is
+  hidden once the file is already read as UTF-8, because there is nothing to
+  convert. A UTF-16 file is converted the same way, dropping the BOM its
+  encoding no longer needs.
+- **Recently opened files are one click away on the welcome screen.** The
+  screen could only offer the file picker, so reopening yesterday's workbook
+  meant finding it again. Every successful open is now remembered in
+  `recent-files.json`, newest first, and the welcome screen lists the last
+  eight by name and path; clicking one opens it. Paths are deduplicated by
+  their canonical spelling, and entries whose file has gone are dropped when
+  the list is read. The cap and the pruning keep the shortcut from becoming a
+  stale file browser.
+- **The grid draws a sheet's bold and italic text, its text colours and its
+  cell fills.** The style tables were already read so an ODS export could carry
+  these, but each grid page sent only a cell's kind and displayed text, so a
+  styled report still opened as uniform black text on white. A page now carries
+  the look of every styled cell — `bold`, `italic`, `color` and `background`,
+  with only the fields the file sets — and the grid applies them as inline CSS,
+  keeping the grid's own alignment and semantic colours where the file sets
+  none. A fill on a cell with no value is sent as a styled blank and drawn, and
+  frozen panes use the same path. Bold, italic, colours and fills are read from
+  `.xlsx`, `.xlsm` and `.ods`; `.xls` and `.xlsb` keep
+  their styles in binary records calamine does not expose, so those files keep
+  the uniform grid. Font names, sizes, underlines, borders and fill patterns
+  are still not rendered.
+- **Exported reports keep their formulas, so reopening one recalculates.** The
+  ODS export wrote only the values a workbook showed, which meant a report
+  survived a trip through the app as a photograph of itself: a total could no
+  longer be edited into a different total, because the cell behind it was a
+  number. Each sheet now remembers the formula of every calculated cell while
+  it is read — charged to the same cell budget as the values, and taken from
+  the shared-formula expansion so a filled-down column arrives as one formula
+  per cell — and the export writes it back beside the cached value as
+  `table:formula`. Excel spells formulas its own way, so the export translates
+  them into OpenFormula: bare references become bracketed ones (`SUM(B2:B3)` →
+  `of:=SUM([.B2:.B3])`, `Sheet2!A1` → `[Sheet2.A1]`, absolute markers kept),
+  commas become argument separators, array constants keep their shape, and
+  `_xlfn.` markers are dropped. A formula already in OpenFormula — an ODS read
+  in — is written back unchanged, so repeated round trips do not drift. String
+  literals, error literals and defined names are left alone. A formula that
+  cannot be expressed faithfully (a structured reference such as
+  `Table1[Qty]`, a whole-row range) is left out rather than written wrong: the
+  cell keeps the value it had, and a calculated cell with no cached value is
+  written with its formula alone for the next application to fill in.
+- **Hidden rows and columns, and frozen panes, survive the ODS export.** A
+  report that hid its working columns or the rows behind a filter came back
+  with everything on show, and the pane that held the header row in place was
+  gone, so the file no longer looked like the thing that was sent. The reader
+  now takes `hidden="1"` from `.xlsx` columns and rows — including a hidden
+  column that carries no width of its own — and
+  `table:visibility="collapse"` from ODF columns and rows, over whatever range
+  a repeat covers, and keeps them as positions on the sheet's layout. The
+  export writes them back the way ODF describes hiding: as `collapse` on the
+  row or column itself, not as a zero width, so a column can be shown again at
+  the width it has. An empty hidden row beyond the last value is written as a
+  hidden row rather than absorbed into a run of ordinary ones, and a hidden
+  column at the edge of the report keeps its column. The freeze — which ODF
+  keeps out of the sheet content entirely — is written into `settings.xml` as
+  LibreOffice's own `ooo:view-settings` split mode and position per sheet, the
+  same shape this app reads back, so the export reopens with the header pinned
+  and the first columns held. The grid itself still shows every row and column:
+  hiding is preserved in the export, not applied to the view.
+
+### Changed
+
+- **A remembered delimiter and encoding are dropped when the file changes.**
+  `text-dialects.json` keyed each choice by path alone, so editing a CSV or
+  replacing it with a different export kept the old choices until the bar was
+  changed. Each entry now records the file's length and modification time; a
+  lookup whose file no longer matches removes the entry, and the next open
+  detects the dialect again. A file that is gone is dropped the same way, and
+  an entry with no file state is no longer trusted. A replacement that keeps
+  both size and timestamp identical is still indistinguishable.
+- **The local release flow checks the signing key before it writes anything.**
+  `release.py` could tag and push a release with whatever key happened to be on
+  the machine; a wrong key then surfaced only when the release workflow refused
+  it, after the tag was already public. It now runs `verify_signing_key.py`
+  against the committed pubkey before printing its plan, reading
+  `TAURI_SIGNING_PRIVATE_KEY` or falling back to `~/.tauri/ExcelScry.key` exactly
+  as the build scripts do. `--resume` makes the same check before it commits or
+  pushes. A missing or wrong key leaves the version and changelog untouched.
+  The verifier now also accepts a path to the key file, not only its base64,
+  which is what the local flow passes.
+- **The workflow guard's refusals are exercised against mutated workflow
+  copies.** `verify_workflow.py` is what keeps both build jobs checking the
+  updater signing key before compiling, but nothing proved it still refused a
+  workflow that had lost that step or moved it after the build.
+  `scripts/test_verify_workflow.py` now mutates copies in a temporary
+  directory — the checkout is only read — and requires the verifier to reject
+  each one with the message that names the broken job.
+
 ## [0.4.0] - 2026-10-20
 
 ### Added
@@ -34,8 +269,8 @@ those entries into a version section and tags the commit that holds it.
   properties on the same cell style as the number format, so a bold money total
   stays bold money; a fill on a cell with no value is written as a styled blank,
   and column widths already read for the grid are written as the matching
-  physical lengths. The grid itself still renders uniformly, and borders and
-  font names/sizes are still not exported.
+  physical lengths. At that release the grid itself still rendered uniformly;
+  borders and font names/sizes are still not exported.
 - **Row heights and merged regions survive the ODS export, and column widths
   cover the whole table.** A report's tall title row, tall total row and merged
   titles used to reopen flattened and unmerged. Row heights, including the

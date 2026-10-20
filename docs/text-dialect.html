@@ -35,13 +35,36 @@
     encoding: <em>Auto</em> stands in both selects, the read worked out
     <code>Windows-1252</code> from bytes that are not UTF-8, and the bar says
     so — no replacement characters, no picker. UTF-16 without a byte order mark
-    is recognised the same way, from the zero byte beside every character.
+    is recognised the same way, from the zero byte beside every character, and
+    a file that is neither is read statistically: a Japanese export names
+    <code>Shift_JIS</code>, a Chinese one <code>GBK</code>, a Russian one
+    <code>Windows-1251</code>. The picker beside the line lists those encodings
+    as well, grouped by script, for the file that has to be read another way.
     Choosing UTF-8 by hand for this file is what still brings up the hint, and
     in the app the bytes it cannot decode show as replacement characters: that
     is what the two selects are now for. Whatever is chosen here is remembered
-    for that file, so reopening it reads it the same way; choosing
-    <em>Auto</em> forgets the choice and lets the bytes decide again. (Shown in
+    for that file, so reopening it reads it the same way unless the file itself
+    changes; choosing <em>Auto</em> forgets the choice and lets the bytes decide
+    again. (Shown in
     the UI harness, which serves this front end against mocked rows; its rows
     are already decoded, so only the bar's hint changes when UTF-8 is chosen.)
+  </figcaption>
+</figure>
+<figure>
+  <img src="shift-jis-detected.png"
+       alt="ExcelScry opening a Japanese CSV and naming its encoding Shift_JIS">
+  <figcaption>
+    A Japanese export whose bytes are Shift_JIS, opened with every select left
+    on <em>Auto</em>. The bar names the encoding the bytes turned out to be and
+    the cells are the file's own characters, not mojibake. The encoding is
+    worked out statistically from the first sixty-four kilobytes: the detector
+    weighs what each candidate encoding can decode and which character pairs
+    its language actually uses, which is what separates Shift_JIS from EUC-JP
+    and both from the Chinese and Korean encodings. A file it gets wrong is
+    one pick away from right — the select draws from the full list of
+    encodings, grouped by script, and the choice applies immediately and is
+    remembered for that file. (Shown in the UI harness, whose rows are already
+    decoded; the detection itself is the Rust side's, covered by its own
+    tests.)
   </figcaption>
 </figure>

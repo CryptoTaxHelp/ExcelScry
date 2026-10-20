@@ -195,6 +195,12 @@ body {
   color: var(--amber);
 }
 
+.textbar-action {
+  margin-left: auto;
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
 .toolbar-spacer {
   flex: 1 1 auto;
 }
@@ -295,6 +301,30 @@ body {
   white-space: nowrap;
 }
 
+/* The value a hidden cell is not showing: present, but not what the grid
+   draws, so it reads as an aside rather than as the cell's text. */
+.readout-value.is-hidden-value {
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+/* What a calculated cell is calculated from, beside the value it produced.
+   Monospaced and dimmed so it reads as the recipe rather than as the result,
+   and cut with an ellipsis: a long formula should not push the readout wide. */
+.readout-formula {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 34ch;
+  padding-left: 9px;
+  border-left: 1px solid var(--line);
+  color: var(--text-dim);
+  font-family: "Cascadia Mono", Consolas, "Courier New", monospace;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ------------------------------------------------------------------ stage */
 
 .stage {
@@ -336,6 +366,71 @@ body {
   margin: 0 0 22px;
   color: var(--text-dim);
   font-size: 14px;
+}
+
+.welcome-recent {
+  margin: 20px 0 0;
+  text-align: left;
+}
+
+.welcome-recent h2 {
+  margin: 0 0 8px;
+  color: #6f83a1;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.recent-files {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 220px;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.recent-file {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: 100%;
+  padding: 8px 10px;
+  overflow: hidden;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  background: rgba(22, 35, 60, 0.55);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.recent-file:hover,
+.recent-file:focus-visible {
+  background: rgba(22, 35, 60, 0.9);
+  border-color: var(--accent);
+  outline: none;
+}
+
+.recent-name,
+.recent-path {
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recent-name {
+  font-weight: 600;
+}
+
+.recent-path {
+  color: var(--text-dim);
+  font-size: 11px;
 }
 
 .welcome-formats {
@@ -454,6 +549,49 @@ body {
   border-right: 1px solid #d6dee8;
 }
 
+/* A header row's text is the column's name, so it needs the whole width of the
+   column: left-aligned and cut rather than centred and clipped mid-letter. */
+.colhead.is-named {
+  justify-content: flex-start;
+  padding-left: 7px;
+  padding-right: 5px;
+}
+
+.colhead-label {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A delimited table names its columns, and a name is worth pressing: the
+   pointer says so, and the column the rows are ordered by keeps an arrow in the
+   strip so the order can be read without scrolling back to the top. */
+.viewer.is-text .colhead.is-sortable {
+  cursor: pointer;
+}
+
+.viewer.is-text .colhead.is-sortable:hover {
+  background: #e4eef9;
+}
+
+.colhead.is-sorted {
+  color: #1e4569;
+  background: #dceaf7;
+  padding-right: 4px;
+}
+
+/* The direction mark sits after a name that has the whole column's width to
+   itself, so it is a fixed glyph rather than a word that would not fit. */
+.colhead-sort {
+  flex: none;
+  margin-left: 4px;
+  font-size: 9px;
+  line-height: 1;
+  color: var(--accent);
+}
+
 .rowhead {
   left: 0;
   width: 100%;
@@ -480,6 +618,55 @@ body {
   background: #dceaf7;
   color: #1e4569;
   box-shadow: inset 3px 0 0 var(--accent);
+}
+
+/* The seam a collapsed run of hidden rows or columns leaves behind: a thin bar
+   in the strip, where the run was, whose tooltip counts what is hidden and
+   which reveals it when clicked. */
+.rowhead.is-seam,
+.colhead.is-seam {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: #0284c7;
+  cursor: pointer;
+}
+
+.rowhead.is-seam:hover,
+.colhead.is-seam:hover {
+  background: #0369a1;
+}
+
+/* A revealed row or column is still hidden in the file, so its number or
+   letter says so rather than passing for an ordinary one. */
+.rowhead.is-hidden-axis,
+.colhead.is-hidden-axis {
+  color: #0284c7;
+  font-style: italic;
+  text-decoration: line-through;
+}
+
+/* The wash over a revealed hidden row or column, drawn over the cells it
+   spans: showing them is a view, not an edit, and they should still read as
+   hidden rather than as ordinary data. */
+.hidden-band {
+  position: absolute;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    135deg,
+    rgba(2, 132, 199, 0.13) 0 5px,
+    rgba(2, 132, 199, 0.03) 5px 11px
+  );
+}
+
+.hidden-band.is-row-band {
+  border-top: 1px dashed rgba(2, 132, 199, 0.6);
+  border-bottom: 1px dashed rgba(2, 132, 199, 0.6);
+}
+
+.hidden-band.is-col-band {
+  border-left: 1px dashed rgba(2, 132, 199, 0.6);
+  border-right: 1px dashed rgba(2, 132, 199, 0.6);
 }
 
 
@@ -539,6 +726,40 @@ body {
 .cell.k-d,
 .cell.k-t {
   color: #4338ca;
+}
+
+/* A value its number format shows nothing for (`#,##0;-#,##0;` hides a zero)
+   is blank in the sheet's own rendering, so it stays blank here too — but the
+   corner dot says the cell is not empty, and the tooltip and readout name the
+   value behind it. */
+.cell.is-hidden::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  /* Darker than the chrome accent: the sheet is white, and a mark that means
+     "there is a value here" has to be seen at five pixels across. */
+  background: #0284c7;
+  pointer-events: none;
+}
+
+/* A cell the file calculates rather than stores: a small triangle in the
+   bottom-right corner, so a total can be told from a typed-in number while
+   browsing. The hidden-value dot keeps the top-right for itself. */
+.cell.has-formula::before {
+  content: "";
+  position: absolute;
+  bottom: 0;
+  right: 0;
+  width: 0;
+  height: 0;
+  border-left: 5px solid transparent;
+  border-bottom: 5px solid #0284c7;
+  opacity: 0.65;
+  pointer-events: none;
 }
 
 /* The pinned header row of a text table. It sits over the top of the body
