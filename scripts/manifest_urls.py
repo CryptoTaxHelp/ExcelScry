@@ -91,28 +91,14 @@ def published_name(location: str, repository: str, tag: str) -> str | None:
     return name or None
 
 
-def release_assets(repository: str, tag: str) -> dict[str, str]:
-    """The assets attached to a release, as ids mapped to their file names.
-
-    A token is used when one is in the environment - the release job signs while
-    the release is a draft, which the API does not show otherwise - and the
-    public API is enough for a release that is already published.
-    """
-    url = f"{API}/repos/{repository}/releases/tags/{urllib.parse.quote(tag, safe='')}"
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-
+def release_json(url: str, headers: dict[str, str]) -> object:
+    """A GitHub API response as JSON, or the reason it could not be read."""
     request = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(
             request, timeout=verify_release.MANIFEST_TIMEOUT
         ) as response:
-            release = json.loads(response.read())
+            return json.loads(response.read())
     except urllib.error.HTTPError as error:
         raise SystemExit(
             f"error: {url} answered {error.code}. The asset names come from the\n"
@@ -124,17 +110,62 @@ def release_assets(repository: str, tag: str) -> dict[str, str]:
     except json.JSONDecodeError as error:
         raise SystemExit(f"error: {url} is not valid JSON: {error}") from None
 
-    assets = release.get("assets") if isinstance(release, dict) else None
-    if not isinstance(assets, list) or not assets:
-        raise SystemExit(f"error: {url} lists no assets, so there is nothing to name")
 
-    names = {}
-    for asset in assets:
-        if isinstance(asset, dict) and asset.get("id") and asset.get("name"):
-            names[str(asset["id"])] = str(asset["name"])
-    if not names:
-        raise SystemExit(f"error: {url} lists no asset ids and names")
-    return names
+def release_assets(repository: str, tag: str) -> dict[str, str]:
+    """The assets attached to a release, as ids mapped to their file names.
+
+    Releases are listed rather than fetched by tag: the by-tag endpoint answers
+    404 for a draft even to an authenticated request, and the release job signs
+    the manifest while its release is still a draft. Listing includes drafts
+    when a token is used, which the release job has, and the public API lists
+    everything a copy can already see.
+    """
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    page = 1
+    while True:
+        url = f"{API}/repos/{repository}/releases?per_page=100&page={page}"
+        releases = release_json(url, headers)
+        if not isinstance(releases, list):
+            raise SystemExit(f"error: {url} is not a list of releases")
+
+        for release in releases:
+            if not isinstance(release, dict) or release.get("tag_name") != tag:
+                continue
+            assets = release.get("assets")
+            if not isinstance(assets, list) or not assets:
+                raise SystemExit(
+                    f"error: the release for {repository}@{tag} lists no assets, so\n"
+                    "       there is nothing to name. Its assets have to be\n"
+                    "       attached before the manifest is signed."
+                )
+            names = {
+                str(asset["id"]): str(asset["name"])
+                for asset in assets
+                if isinstance(asset, dict) and asset.get("id") and asset.get("name")
+            }
+            if not names:
+                raise SystemExit(
+                    f"error: the release for {repository}@{tag} lists no asset ids\n"
+                    "       and names"
+                )
+            return names
+
+        # A full page may leave the release on the next one; a short page is
+        # the end of the list, and the tag is not on it.
+        if len(releases) < 100:
+            raise SystemExit(
+                f"error: {repository} has no release for tag {tag}, so there is\n"
+                "       nothing to name. The release has to exist and its assets\n"
+                "       have to be attached before the manifest is signed."
+            )
+        page += 1
 
 
 def rewrite(manifest: dict, repository: str, tag: str, names: dict[str, str]) -> list[str]:

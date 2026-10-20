@@ -8,9 +8,10 @@ and by then it is signed and reachable, so the refusals are checked here rather
 than discovered from a release page.
 
 The release API is not called: the names of a release's assets are passed in, the
-way the script takes them, so this runs without a token or a published release.
-What the real API returns is checked by the release job, which rewrites the
-manifest of the release it is publishing.
+way the script takes them, so this runs without a token or a published release,
+and the release lookup is exercised against a fake list of releases. What the
+real API returns is checked by the release job, which rewrites the manifest of
+the release it is publishing.
 
     python scripts/test_manifest_urls.py
 
@@ -105,6 +106,67 @@ def every_platform_is_named_even_when_they_share_an_asset() -> None:
         urls == {f"https://github.com/{REPOSITORY}/releases/download/{TAG}/{INSTALLER}"},
         repr(urls),
     )
+
+
+def a_draft_release_is_found_by_listing_releases() -> None:
+    """The by-tag endpoint hides drafts, so the lookup has to walk the list.
+
+    The release job signs the manifest while the release is a draft. Asking for
+    the release by tag answers 404 at that point even with a token, which is
+    what made the first 0.4.0 release stop before its manifest was signed.
+    """
+    first = [
+        {"tag_name": f"v0.0.{index}", "draft": False, "assets": []}
+        for index in range(100)
+    ]
+    second = [
+        {
+            "tag_name": TAG,
+            "draft": True,
+            "assets": [
+                {"id": int(asset_id), "name": name}
+                for asset_id, name in ASSETS.items()
+            ],
+        }
+    ]
+    listing = f"https://api.github.com/repos/{REPOSITORY}/releases?per_page=100&page="
+    pages = {f"{listing}1": first, f"{listing}2": second}
+    seen = []
+    original = manifest_urls.release_json
+
+    def fake(url: str, headers: dict[str, str]) -> object:
+        seen.append(url)
+        return pages.get(url, [])
+
+    manifest_urls.release_json = fake
+    try:
+        names = manifest_urls.release_assets(REPOSITORY, TAG)
+    finally:
+        manifest_urls.release_json = original
+
+    check(
+        "a draft release on a later page is found by listing releases",
+        names == ASSETS,
+        repr(names),
+    )
+    check(
+        "the lookup does not use the by-tag endpoint",
+        seen == [f"{listing}1", f"{listing}2"],
+        repr(seen),
+    )
+
+
+def a_tag_with_no_release_is_refused() -> None:
+    original = manifest_urls.release_json
+    manifest_urls.release_json = lambda url, headers: []
+    try:
+        refused(
+            lambda: manifest_urls.release_assets(REPOSITORY, TAG),
+            "no release for tag",
+            "a tag with no release is refused",
+        )
+    finally:
+        manifest_urls.release_json = original
 
 
 def a_manifest_that_already_names_its_assets_is_left_alone() -> None:
@@ -253,6 +315,9 @@ def the_check_form_reads_a_manifest_and_says_what_it_finds() -> None:
 
 
 def main() -> int:
+    print("Finding the release whose assets are named")
+    a_draft_release_is_found_by_listing_releases()
+    a_tag_with_no_release_is_refused()
     print("Rewriting the manifest's asset urls")
     an_asset_id_is_named_by_the_file_the_release_publishes_it_as()
     every_platform_is_named_even_when_they_share_an_asset()
