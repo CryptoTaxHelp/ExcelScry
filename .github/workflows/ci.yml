@@ -332,7 +332,12 @@ jobs:
           tauri signer sign \
             --app-version "$(python scripts/bump_version.py --print)" \
             updater-manifest/latest.json
-          gh release upload "${{ github.ref_name }}" updater-manifest/latest.json.sig --clobber
+          # The rewritten manifest is uploaded with its signature, not just the
+          # signature: the draft still carries the manifest tauri-action wrote,
+          # whose asset urls are the API's. Leaving those bytes attached would
+          # publish a manifest the signature above does not cover.
+          gh release upload "${{ github.ref_name }}" \
+            updater-manifest/latest.json updater-manifest/latest.json.sig --clobber
 
       # The release becomes visible here and nowhere else. Every asset it will
       # serve is already attached - the installer, its signature, `latest.json`

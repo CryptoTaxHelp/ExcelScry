@@ -20,6 +20,8 @@ instead, and the ordering it has to have is asserted:
   instead of a compile;
 * the release job's build creates a draft, not a published release;
 * the manifest is signed after that build and before anything is published;
+* the rewritten manifest is uploaded with its signature, so the release serves
+  the bytes that were signed rather than the ones the build attached;
 * the step that publishes runs the release check over the manifest and its
   signature, and only then marks the release published;
 * nothing else in the workflow can make a release visible at all.
@@ -113,6 +115,20 @@ def main() -> int:
     require(build < sign, f"{SIGN!r} has to run after {BUILD!r}")
     require(sign < publish, f"{PUBLISH!r} has to run after the manifest is signed")
     require(publish == len(steps) - 1, f"{PUBLISH!r} has to be the last step of the job")
+
+    # The signature is over the manifest this step wrote, so that manifest has
+    # to be what the release serves. The build attached the one tauri-action
+    # wrote, whose asset urls are still the release API's.
+    sign_run = steps[sign].get("run", "")
+    upload = sign_run[sign_run.find("gh release upload") :] if "gh release upload" in sign_run else ""
+    uploaded = upload.replace("\\", " ").split()
+    require(
+        "updater-manifest/latest.json" in uploaded
+        and "updater-manifest/latest.json.sig" in uploaded,
+        f"the {SIGN!r} step has to upload the rewritten latest.json with its\n"
+        "       signature; uploading only the signature leaves the release serving\n"
+        "       bytes that signature does not cover",
+    )
 
     publish_run = steps[publish].get("run", "")
     require(
