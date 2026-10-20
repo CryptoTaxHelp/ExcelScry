@@ -193,11 +193,21 @@ def key_from_secret(secret: str, password: str = "") -> SigningKey:
     # `release.py` has the developer's key as a file, so accept a path as well
     # as the base64 secret CI passes. A pasted key file has newlines and is left
     # for `_base64` to refuse, rather than being probed as a filename.
+    #
+    # The file may hold the key itself, or the base64 of it - which is what
+    # `tauri signer generate` prints and what a developer pastes into the
+    # secret, so it is a common way to keep one on disk. The CLI reads such a
+    # file's content and decodes it, which is why both work there; so does this.
     candidate = secret.strip()
+    text = None
     if "\n" not in candidate and pathlib.Path(candidate).is_file():
-        secret = base64.b64encode(pathlib.Path(candidate).read_bytes()).decode("ascii")
-
-    text = _base64(secret, f"{KEY_ENV}").decode("utf-8", "replace")
+        content = pathlib.Path(candidate).read_text(encoding="utf-8", errors="replace")
+        if content.lstrip().startswith("untrusted comment:"):
+            text = content
+        else:
+            secret = content.strip()
+    if text is None:
+        text = _base64(secret, f"{KEY_ENV}").decode("utf-8", "replace")
     lines = [line for line in text.splitlines() if line.strip()]
     if len(lines) < 2 or not lines[0].startswith("untrusted comment:"):
         raise SystemExit(

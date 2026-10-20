@@ -160,6 +160,26 @@ def a_key_file_path_is_read() -> None:
     check("and its public key is read", key.public_key == material)
 
 
+def a_path_to_a_file_holding_the_base64_key_is_read() -> None:
+    key_id, material = key_id_and_material(pubkey())
+    text = (
+        "untrusted comment: minisign secret key\n"
+        + base64.b64encode(secret_key_blob(key_id, material)).decode()
+        + "\n"
+    )
+    # What `tauri signer generate` prints, and what a developer pastes into the
+    # secret, kept on disk instead of in the environment: the CLI decodes a
+    # file's content, so a path has to work for this spelling too.
+    encoded = base64.b64encode(text.encode()).decode() + "\n"
+    with tempfile.TemporaryDirectory() as directory:
+        path = pathlib.Path(directory) / "ExcelScry.key"
+        path.write_text(encoded, encoding="utf-8", newline="")
+        key = verify_signing_key.key_from_secret(str(path))
+
+    check("a path to the base64 of the key is accepted", key.key_id == key_id)
+    check("and its public key is read", key.public_key == material)
+
+
 def a_secret_that_is_not_base64_is_refused() -> None:
     refused(
         lambda: verify_signing_key.key_from_secret(
@@ -246,6 +266,7 @@ def main() -> int:
     print("A key that can sign this release")
     a_key_this_build_trusts_is_accepted()
     a_key_file_path_is_read()
+    a_path_to_a_file_holding_the_base64_key_is_read()
     print("A key that cannot")
     a_missing_key_says_what_to_do()
     a_secret_that_is_not_base64_is_refused()
