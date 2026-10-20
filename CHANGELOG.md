@@ -95,9 +95,9 @@ those entries into a version section and tags the commit that holds it.
   so and suggests another encoding.
 - **CSV encodings are recognised, so the picker is rarely needed.** A `.csv`
   from a Windows tool is usually Windows-1252 or UTF-16 without a byte order
-  mark, and both used to need the bar: the first arrived as `cafÃ©`, the second
-  as one character per byte. The bytes now settle it before the first record is
-  read — a stream that is not UTF-8 is Windows-1252, and a zero byte beside
+  mark, and both used to need the bar: the first arrived with a replacement
+  glyph after `caf`, the second as one character per byte. The bytes now settle
+  it before the first record is read — a stream that is not UTF-8 is Windows-1252, and a zero byte beside
   every character is UTF-16, little- or big-endian, with the zeros' side
   deciding the byte order and the window decoded to confirm it is text. A file
   whose first 8 KiB look like UTF-8 but whose later bytes do not is read again
