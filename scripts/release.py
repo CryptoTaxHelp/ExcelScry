@@ -15,6 +15,8 @@ that starts the release job, so nothing happens until the checks pass:
   tag exists locally or on the remote;
 * `CHANGELOG.md` has `Unreleased` entries to move, and the version heading is
   not already there;
+* the updater signing key is present, and is the key `tauri.conf.json` trusts,
+  checked before anything is written;
 * afterwards, the same check CI runs - `bump_version.py --check --tag` - has to
   pass, and only the files a release may touch are allowed to have changed.
 
@@ -39,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import os
 import pathlib
 import re
 import subprocess
@@ -52,6 +55,8 @@ import bump_version  # noqa: E402  (the path above is what makes this importable
 import release_notes  # noqa: E402
 
 CHANGELOG = "CHANGELOG.md"
+KEY_ENV = "TAURI_SIGNING_PRIVATE_KEY"
+DEFAULT_KEY = pathlib.Path.home() / ".tauri" / "ExcelScry.key"
 UNRELEASED = re.compile(r"(?m)^## \[Unreleased\][ \t]*$")
 NEXT_SECTION = re.compile(r"(?m)^## \[")
 VERSION_HEADING = re.compile(r"(?m)^## \[(?P<version>[^\]]+)\]")
@@ -148,7 +153,7 @@ def dirty_files() -> list[str]:
     return [line[3:].strip().strip('"') for line in listing.splitlines() if line.strip()]
 
 
-def run(*args: str, quiet: bool = False) -> None:
+def run(*args: str, quiet: bool = False, env: dict[str, str] | None = None) -> None:
     """Run a command, or fail with its own output.
 
     `quiet` is for commands that report by their exit code and print pages of
@@ -160,7 +165,7 @@ def run(*args: str, quiet: bool = False) -> None:
     sys.stderr.flush()
     try:
         result = subprocess.run(
-            args, cwd=ROOT, text=True, encoding="utf-8", capture_output=quiet
+            args, cwd=ROOT, text=True, encoding="utf-8", capture_output=quiet, env=env
         )
     except FileNotFoundError:
         raise SystemExit(
@@ -239,6 +244,22 @@ def resume_command() -> str:
         return f"python {invoked.resolve().relative_to(ROOT).as_posix()} --resume"
     except ValueError:  # started from outside the repository, so name it in full
         return f"{sys.executable} {invoked} --resume"
+
+
+def signing_key() -> None:
+    """Stop before writing anything if the key cannot sign this release.
+
+    The Tauri bundler and the release workflow would both fail on a missing or
+    wrong key, but only after this script has already committed and tagged. The
+    check reads the same key the build does: the environment when it is set,
+    otherwise the key at the path `scripts/build.sh` and `build.ps1` fall back
+    to. It runs the same verifier CI uses, against the pubkey in this checkout's
+    `tauri.conf.json`, so the local flow cannot drift from the workflow.
+    """
+    environment = os.environ.copy()
+    if not environment.get(KEY_ENV) and DEFAULT_KEY.is_file():
+        environment[KEY_ENV] = str(DEFAULT_KEY)
+    run(sys.executable, str(SCRIPTS / "verify_signing_key.py"), env=environment)
 
 
 def gate(version: str) -> None:
@@ -352,6 +373,12 @@ def release(args) -> int:
         raise SystemExit(f"error: tag v{new} already exists on {remote}")
 
     rewritten, entries = moved_changelog(new, date)
+
+    # Before the plan is printed, and before a single file is written: a key
+    # that cannot sign this build would otherwise be found after the release
+    # commit and tag had already been made.
+    if not args.dry_run:
+        signing_key()
 
     print(f"Release ExcelScry {new} (currently {current})")
     print()
@@ -509,6 +536,10 @@ def resume(args) -> int:
     # The tag goes on the commit this run will make, when it still has to make
     # it, and otherwise on the commit the tag already names.
     where = "the release commit" if needs_commit else short(tagged[1] if tagged else "HEAD")
+    # A resumed release may still have to commit, tag, or push, so it needs the
+    # same key check before it touches anything.
+    if not args.dry_run:
+        signing_key()
     print(f"Finish ExcelScry {version}, interrupted after its version was written")
     print()
     if needs_commit:

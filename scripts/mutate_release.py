@@ -145,6 +145,36 @@ MUTATIONS: list[tuple[str, list[tuple[str, str]], str]] = [
         "a full release",
     ),
     (
+        "the signing-key preflight removed from a release",
+        [
+            (
+                "    if not args.dry_run:\n"
+                "        signing_key()\n"
+                "\n"
+                '    print(f"Release ExcelScry {new} (currently {current})")',
+                "    if False:\n"
+                "        signing_key()\n"
+                "\n"
+                '    print(f"Release ExcelScry {new} (currently {current})")',
+            )
+        ],
+        "a signing key that is not the one the app trusts",
+    ),
+    (
+        "the signing-key preflight removed from --resume",
+        [
+            (
+                "    if not args.dry_run:\n"
+                "        signing_key()\n"
+                '    print(f"Finish ExcelScry {version}, interrupted after its version was written")',
+                "    if False:\n"
+                "        signing_key()\n"
+                '    print(f"Finish ExcelScry {version}, interrupted after its version was written")',
+            )
+        ],
+        "a commit that failed, and the --resume that finishes it",
+    ),
+    (
         "the --dry-run early return removed from the release path",
         [
             (

@@ -20,6 +20,7 @@ import base64
 import hashlib
 import pathlib
 import sys
+import tempfile
 
 HERE = pathlib.Path(__file__).resolve().parent
 
@@ -143,6 +144,22 @@ def a_missing_key_says_what_to_do() -> None:
     )
 
 
+def a_key_file_path_is_read() -> None:
+    key_id, material = key_id_and_material(pubkey())
+    text = (
+        "untrusted comment: minisign secret key\n"
+        + base64.b64encode(secret_key_blob(key_id, material)).decode()
+        + "\n"
+    )
+    with tempfile.TemporaryDirectory() as directory:
+        path = pathlib.Path(directory) / "ExcelScry.key"
+        path.write_text(text, encoding="utf-8", newline="")
+        key = verify_signing_key.key_from_secret(str(path))
+
+    check("a path to the key file is accepted", key.key_id == key_id)
+    check("and its public key is read", key.public_key == material)
+
+
 def a_secret_that_is_not_base64_is_refused() -> None:
     refused(
         lambda: verify_signing_key.key_from_secret(
@@ -228,6 +245,7 @@ def an_encrypted_key_is_read_with_its_password() -> None:
 def main() -> int:
     print("A key that can sign this release")
     a_key_this_build_trusts_is_accepted()
+    a_key_file_path_is_read()
     print("A key that cannot")
     a_missing_key_says_what_to_do()
     a_secret_that_is_not_base64_is_refused()

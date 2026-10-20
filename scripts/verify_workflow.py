@@ -30,6 +30,11 @@ Run from the repository root, or let the checks job run it on every push:
 
     python scripts/verify_workflow.py
 
+The optional path is for the mutation test, which checks a copy of the workflow
+without touching this checkout:
+
+    python scripts/verify_workflow.py path/to/ci.yml
+
 Exit status 1 means the workflow would build without the key it needs, or publish
 something a copy could read before its manifest was signed.
 """
@@ -63,8 +68,8 @@ def step_name(step: dict) -> str:
     return step.get("name", step.get("uses", "?"))
 
 
-def main() -> int:
-    text = WORKFLOW.read_text(encoding="utf-8")
+def main(path: pathlib.Path = WORKFLOW) -> int:
+    text = path.read_text(encoding="utf-8")
     workflow = yaml.safe_load(text)
 
     problems: list[str] = []
@@ -120,7 +125,9 @@ def main() -> int:
     # to be what the release serves. The build attached the one tauri-action
     # wrote, whose asset urls are still the release API's.
     sign_run = steps[sign].get("run", "")
-    upload = sign_run[sign_run.find("gh release upload") :] if "gh release upload" in sign_run else ""
+    upload = ""
+    if "gh release upload" in sign_run:
+        upload = sign_run[sign_run.find("gh release upload") :]
     uploaded = upload.replace("\\", " ").split()
     require(
         "updater-manifest/latest.json" in uploaded
@@ -222,4 +229,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    if len(sys.argv) > 2:
+        raise SystemExit("usage: python scripts/verify_workflow.py [workflow]")
+    workflow = pathlib.Path(sys.argv[1]) if len(sys.argv) == 2 else WORKFLOW
+    raise SystemExit(main(workflow))

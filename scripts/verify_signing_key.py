@@ -21,8 +21,10 @@ unset, which is what the CLI assumes when it is not given one - to identify it.
     python scripts/verify_signing_key.py
 
 Reads `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` from
-the environment, and never prints either. Exit status 1 means this build cannot
-be signed, and says what to do about it.
+the environment, and never prints either. The key may be the base64 of a key
+file or a path to one, which is what `release.py` passes when it runs this
+check on a developer's machine. Exit status 1 means this build cannot be
+signed, and says what to do about it.
 """
 
 from __future__ import annotations
@@ -157,9 +159,10 @@ def _base64(value: str, what: str) -> bytes:
         raise SystemExit(
             f"error: {what} is not valid base64.\n"
             "       The secret is the base64 of a key file, which is what\n"
-            f"       `base64 -w0 < ~/.tauri/ExcelScry.key` writes on Linux or\n"
+            "       `base64 -w0 < ~/.tauri/ExcelScry.key` writes on Linux or\n"
             "       `[Convert]::ToBase64String([IO.File]::ReadAllBytes(...))` on\n"
-            "       Windows; pasting the key file itself fails here."
+            "       Windows, or a path to the key file such as\n"
+            "       ~/.tauri/ExcelScry.key; pasting the key file itself fails here."
         ) from None
 
 
@@ -174,14 +177,25 @@ def key_from_secret(secret: str, password: str = "") -> SigningKey:
             f"error: {KEY_ENV} is empty, so this build cannot be signed.\n"
             "       Every `tauri build` signs its updater artifact, so a build\n"
             "       without the key fails minutes later as an exit 1 from\n"
-            "       `tauri build` that says nothing about a secret. Add it to\n"
-            "       this repository's Actions secrets:\n"
+            "       `tauri build` that says nothing about a secret. Locally, set\n"
+            "       it to the key file, or put the key at ~/.tauri/ExcelScry.key:\n"
+            "\n"
+            "         export TAURI_SIGNING_PRIVATE_KEY=~/.tauri/ExcelScry.key\n"
+            "\n"
+            "       In CI, add it to this repository's Actions secrets:\n"
             "\n"
             "         gh secret set TAURI_SIGNING_PRIVATE_KEY < ~/.tauri/ExcelScry.key\n"
             "\n"
             "       ...where the file holds the base64 secret key as it is written\n"
-            "       there, not a path to it."
+            "       there. A path to the file is accepted here as well."
         )
+
+    # `release.py` has the developer's key as a file, so accept a path as well
+    # as the base64 secret CI passes. A pasted key file has newlines and is left
+    # for `_base64` to refuse, rather than being probed as a filename.
+    candidate = secret.strip()
+    if "\n" not in candidate and pathlib.Path(candidate).is_file():
+        secret = base64.b64encode(pathlib.Path(candidate).read_bytes()).decode("ascii")
 
     text = _base64(secret, f"{KEY_ENV}").decode("utf-8", "replace")
     lines = [line for line in text.splitlines() if line.strip()]

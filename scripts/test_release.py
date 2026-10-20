@@ -24,7 +24,9 @@ Exit status 1 means the release flow does not do what it says it does.
 
 from __future__ import annotations
 
+import base64
 import datetime
+import hashlib
 import os
 import pathlib
 import shutil
@@ -38,6 +40,8 @@ ROOT = HERE.parent
 sys.path.insert(0, str(HERE))
 
 import bump_version  # noqa: E402  (the path above is what makes this importable)
+import verify_release  # noqa: E402
+import verify_signing_key  # noqa: E402
 
 # Read from this checkout rather than written down, so the test keeps working
 # across a release: the fixture stands at the current version, and the version it
@@ -92,6 +96,27 @@ All notable changes to ExcelScry are documented in this file.
 - What the release before this one carried.
 """
 
+def signing_key_file(*, other_id: bool = False) -> str:
+    """A key file carrying the committed pubkey, or another key's id.
+
+    The secret half is only ever read to identify the key, so a zero seed in
+    front of the real public key is enough for the fixture. `other_id` gives the
+    same material a different key id, which is the mistake this check is for: a
+    valid key that is not the one an installed copy trusts.
+    """
+    config = verify_release.read_config()
+    key_id, material = verify_release.minisign_public_key(
+        config["plugins"]["updater"]["pubkey"]
+    )
+    if other_id:
+        key_id = bytes(byte ^ 0xFF for byte in key_id)
+    prefix = b"Ed\x00\x00B2" + bytes(32) + bytes(8) + bytes(8)
+    secret = bytes(32) + material
+    checksum = hashlib.blake2b(prefix[:2] + key_id + secret, digest_size=32).digest()
+    blob = prefix + key_id + secret + checksum
+    return "untrusted comment: minisign secret key\n" + base64.b64encode(blob).decode() + "\n"
+
+
 CASES: list[tuple[str, ...]] = []
 FAILURES: list[str] = []
 CASE = ""
@@ -135,6 +160,13 @@ class Repository:
         self.root = pathlib.Path(tempfile.mkdtemp(prefix="excelscry-release-test-"))
         self.bare = self.root / "origin.git"
         self.work = self.root / "work"
+        # A key outside the checkout, as a developer's is, and the environment
+        # the real release would read it from.
+        self.key = self.root / "ExcelScry.key"
+        self.key.write_text(signing_key_file(), encoding="utf-8", newline="")
+        self.environment = os.environ.copy()
+        self.environment[verify_signing_key.KEY_ENV] = str(self.key)
+        self.environment.pop(verify_signing_key.PASSWORD_ENV, None)
 
         git("init", "--bare", "--quiet", str(self.bare), cwd=self.root)
         git("init", "--quiet", str(self.work), cwd=self.root)
@@ -213,14 +245,18 @@ class Repository:
 
     # -- running the thing under test --------------------------------------
 
-    def run_release(self, *args: str):
+    def run_release(self, *args: str, env: dict[str, str] | None = None):
         """Run the copy of `release.py` inside the fixture, as a person would."""
+        environment = dict(self.environment)
+        if env:
+            environment.update(env)
         return subprocess.run(
             [sys.executable, str(self.work / "scripts" / "release.py"), *args],
             cwd=self.work,
             capture_output=True,
             text=True,
             encoding="utf-8",
+            env=environment,
         )
 
     def release(self, version: str, *extra: str):
@@ -388,6 +424,24 @@ def a_full_release_does_everything_it_planned(repository: Repository) -> None:
     check("listing the release commit first", f"- Release ExcelScry {NEXT}" in text)
     check("it said what the tag starts", f"The tag v{NEXT} starts the release job:" in text)
     check("and what the job needs to sign with", "TAURI_SIGNING_PRIVATE_KEY" in text)
+
+
+@case("a signing key that is not the one the app trusts")
+def a_signing_key_that_does_not_match_is_refused(repository: Repository) -> None:
+    before = repository.head()
+    changelog = repository.read("CHANGELOG.md")
+    wrong = repository.root / "other.key"
+    wrong.write_text(signing_key_file(other_id=True), encoding="utf-8", newline="")
+
+    result = repository.run_release(
+        NEXT, env={verify_signing_key.KEY_ENV: str(wrong)}
+    )
+    refused(result, "not the one this build trusts")
+    check("nothing was committed", repository.head() == before)
+    check("nothing was tagged", repository.tags() == f"v{CURRENT}", repository.tags())
+    check("the version was not written", NEXT not in repository.read(bump_version.CARGO_TOML))
+    check("the changelog is untouched", repository.read("CHANGELOG.md") == changelog)
+    check("and the tree is still clean", repository.status() == "", repository.status())
 
 
 @case("--dry-run")
@@ -621,6 +675,18 @@ def a_commit_that_failed_is_finished_by_resume(repository: Repository) -> None:
         git("rev-parse", repository.branch, cwd=repository.bare) == before,
     )
     check("so the tree is not clean", repository.status() != "")
+
+    # A resume has to make the same check before it commits or pushes: the key
+    # is what the build CI starts needs, and finding out after the tag is too
+    # late for this run to stop cleanly.
+    wrong = repository.root / "other.key"
+    wrong.write_text(signing_key_file(other_id=True), encoding="utf-8", newline="")
+    blocked = repository.run_release(
+        "--resume", env={verify_signing_key.KEY_ENV: str(wrong)}
+    )
+    refused(blocked, "not the one this build trusts")
+    check("the resume made no commit", repository.head() == before)
+    check("and made no tag", repository.tags() == f"v{CURRENT}", repository.tags())
 
     hook.unlink()
     result = repository.resume()

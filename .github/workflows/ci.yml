@@ -101,6 +101,9 @@ jobs:
         run: |
           python -m pip install --quiet pyyaml
           python scripts/verify_workflow.py
+          # The verifier's own refusals: copies of this workflow with the key
+          # preflight removed, or moved after the build, have to fail it.
+          python scripts/test_verify_workflow.py
 
   # The release flow's test is worth what it catches, and a test that has stopped
   # catching something goes on passing - including on the commit that breaks the
