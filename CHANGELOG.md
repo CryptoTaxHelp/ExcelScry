@@ -9,6 +9,8 @@ those entries into a version section and tags the commit that holds it.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-20
+
 ### Added
 
 - **A format's zero section and its section colours survive the ODS export.**
@@ -97,15 +99,16 @@ those entries into a version section and tags the commit that holds it.
   from a Windows tool is usually Windows-1252 or UTF-16 without a byte order
   mark, and both used to need the bar: the first arrived with a replacement
   glyph after `caf`, the second as one character per byte. The bytes now settle
-  it before the first record is read — a stream that is not UTF-8 is Windows-1252, and a zero byte beside
-  every character is UTF-16, little- or big-endian, with the zeros' side
-  deciding the byte order and the window decoded to confirm it is text. A file
-  whose first 8 KiB look like UTF-8 but whose later bytes do not is read again
-  whole as Windows-1252 rather than shown with replacement characters, and a
-  multi-byte character cut in half by that window is not mistaken for one. The
-  encoding stays on Auto in the bar, which names what the read settled on;
-  choosing one still overrides detection, and an explicit UTF-8 read of a
-  legacy file still reports the replacement characters and the hint
+  it before the first record is read — a stream that is not UTF-8 is
+  Windows-1252, and a zero byte beside every character is UTF-16, little- or
+  big-endian, with the zeros' side deciding the byte order and the window
+  decoded to confirm it is text. A file whose first 8 KiB look like UTF-8 but
+  whose later bytes do not is read again whole as Windows-1252 rather than
+  shown with replacement characters, and a multi-byte character cut in half by
+  that window is not mistaken for one. The encoding stays on Auto in the bar,
+  which names what the read settled on; choosing one still overrides detection,
+  and an explicit UTF-8 read of a legacy file still reports the replacement
+  characters and the hint
   ([docs/text-dialect.html](docs/text-dialect.html)).
 - **The delimiter and encoding chosen for a file are remembered for it.** An
   export that arrives semicolon-separated in Windows-1252 every week had to be
