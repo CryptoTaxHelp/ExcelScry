@@ -9,6 +9,8 @@ those entries into a version section and tags the commit that holds it.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-21
+
 ### Added
 
 - **The grid's view switches are in a View menu.** Showing the rows and
