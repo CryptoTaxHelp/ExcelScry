@@ -75,7 +75,12 @@ registers ExcelScry with Windows' Default Apps list.
   header and anything above it keep their places, so an export with a title or
   a note still reads as a document rather than having its preamble shuffled
   into the data. This is a view of the rows, not an edit: the file on disk is
-  never written, and a reload reads the records back as the file has them. A
+  never written. It is a view worth coming back to, so the order is remembered
+  for the file beside its delimiter and header row, and the export reopens in
+  it — the rows are already in that order when the grid is first painted, with
+  the arrow and the status bar naming it. *File order* in the delimited-text
+  bar puts the records back the way the file has them, moving the rows in
+  memory rather than reading the file again, and stops remembering the order. A
   workbook keeps its own row order — its rows are a layout, not a list of
   records — so its column heads stay plain letters and are not sort controls.
 - **Every file reopens where it was left.** A workbook is rarely read from its
@@ -90,6 +95,17 @@ registers ExcelScry with Windows' Default Apps list.
   so a different export put at the same path opens at its own top instead of
   inheriting the row the old file was left on; an unreadable store is ignored
   and the file opens at A1 as it would have.
+- **Column widths are the reader's to set, and they stay set.** A report's own
+  columns are sometimes too narrow for the notes in them and too wide for the
+  dates, so every column's right edge in the letter strip is a grip: dragging it
+  widens or narrows that column, and the grid lays the rest of the sheet out
+  around it as it moves. The width is remembered per sheet, per file, beside the
+  sheet, cell and scroll offset the file reopens at, so the table comes back
+  the shape it was read in; switching tabs gives each tab its own widths back
+  rather than lending one sheet's shape to another, and double-clicking an edge
+  puts that column back to the width the file gives it. Nothing is written to
+  the workbook — a widened column is how the file is read, not an edit to it —
+  and the export still carries the sheet's own widths.
 - **Recent files are one click away.** The welcome screen lists the last eight
   files opened, newest first, with the full path under the name; clicking one
   opens it again. The list is stored per user and pruned when a file is gone,
@@ -109,6 +125,19 @@ registers ExcelScry with Windows' Default Apps list.
   LibreOffice stores it in the ODS view settings, and both are read. Clicking,
   arrow keys and scrolling all work across the frozen boundary; a text table's
   chosen header row remains a separate pin.
+- **The view switches live in one menu.** What the sheet hides, where its data
+  begins and where the part that scrolls begins used to be scattered — a
+  toolbar button that appeared only for some files, and two places the reader
+  had to find by hand. **View** now opens a menu that carries all three: the
+  hidden-rows switch with the count and a tick when they are being shown,
+  **Jump to data** (`Ctrl+Shift+J`) for the corner of the data rather than A1,
+  and **First scrolling cell** (`Ctrl+Shift+Home`) for the cell where the
+  scrolling area begins, past any frozen rows and columns or pinned header.
+  Both jumps put their target at the top-left of the view instead of merely
+  scrolling it into sight, and neither lands under the band it just cleared. An
+  action that cannot be taken explains itself — a sheet that hides nothing says
+  so, one that freezes nothing says the whole grid scrolls — and the toolbar
+  keeps its one-click hidden-rows button beside the menu.
 - **The sheet's own emphasis and colours are visible.** Bold and italic text,
   text colours and cell fills are drawn in the grid, including a filled cell
   with no value, so a report opens looking like the table its author made. The
@@ -164,16 +193,23 @@ registers ExcelScry with Windows' Default Apps list.
   somebody typed. Cells the file calculates now carry a small triangle in their
   bottom-right corner, hovering one names its formula, and selecting one puts
   that formula beside the value in the readout — `G7`, `$16,431.78`, then
-  `=D7*E7`. It is shown with one leading `=` whatever syntax the file writes:
-  Excel's `D7*E7` and an ODS's `of:=D7*E7` both read `=D7*E7`, while the text
+  `=E7*F7`. It is shown with one leading `=` whatever syntax the file writes:
+  Excel's `E7*F7` and an ODS's `of:=E7*F7` both read `=E7*F7`, while the text
   the export writes stays the reader's own. A cell whose formula came with no
   cached value is still a cell, marked like the rest rather than left out as
-  empty.
+  empty. **Trace** beside the formula opens the chain around it: the cells that
+  formula reads and the cells that are calculated from it, each with its own
+  text, so a report's calculations can be followed in both directions instead
+  of only one step at a time. Every reference is a button, and the panel
+  follows the selection, so the chain is walked without losing the place it
+  started from. `Ctrl+Shift+C` copies that formula rather than the value it
+  produced, which is the form a formula bar or another sheet wants.
 - **Virtualised grid**: only the cells in view exist in the DOM and cells are
   fetched in tiles as you scroll, so a 500,000-row sheet stays responsive.
 - Unformatted cells keep the spreadsheet conventions: numbers right-aligned,
   dates as `YYYY-MM-DD`, errors in red, booleans centred.
-- Sheet tabs, keyboard navigation, per-cell copy (`Ctrl+C`), `Ctrl+O` to open,
+- Sheet tabs, keyboard navigation, per-cell copy (`Ctrl+C`, and `Ctrl+Shift+C`
+  for a calculated cell's formula), `Ctrl+O` to open,
   drag-and-drop, and a cell readout bar.
 - Opens in a single instance: double-clicking another workbook reuses the
   running window.
@@ -330,7 +366,17 @@ ExcelScry.exe "C:\path\book.xlsx"   # open a workbook straight away
 - Arrow keys, `PageUp`/`PageDown`, `Home`/`End` — move the selection, stepping
   over any rows or columns the sheet hides rather than landing on a cell that
   is collapsed away.
-- `Ctrl+C` — copy the selected cell's text.
+- **View** — the grid's switches: showing the rows and columns the sheet
+  hides, jumping to the corner of the data, and jumping to the first cell past
+  what is frozen. The two jumps also answer to `Ctrl+Shift+J` and
+  `Ctrl+Shift+Home`.
+- `Ctrl+C` — copy the selected cell's text. `Ctrl+Shift+C` copies what a
+  calculated cell is calculated from — `=E7*F7`, as the readout shows it — so a
+  formula can be pasted into a formula bar or another sheet instead of arriving
+  as the number it produced. The references are copied exactly as the file
+  writes them; nothing is shifted for the destination, since this app never
+  writes to a workbook. A cell that is not calculated has no formula to give,
+  and the status bar says so rather than copying its value twice.
 
 ## Updates
 
@@ -523,6 +569,8 @@ src-tauri/
   ods_export.rs         writing ODS via spreadsheet-ods
   ods_formats.rs        translating format codes into ODF number styles
   sheet_layout.rs       reading column widths, row heights, merges and freezes
+  view_prefs.rs         remembering where each file was left: sheet, cell,
+                        scroll offset and the column widths that were dragged
   trust.rs              package inspection: macros, links, connections, objects
   update.rs             update check and install, on tauri-plugin-updater
   manifest.rs           fetching the update manifest, checking its signature, and
@@ -744,15 +792,22 @@ its third record, pinned by number rather than assumed, and
 [docs/sort-columns.html](docs/sort-columns.html) shows that same run ordered by
 its `Units` column, highest first, with its title and note left where they
 were, and [docs/remembered-view.html](docs/remembered-view.html) shows it
-reopening near its last records with its cell still selected.
+reopening near its last records with its cell still selected, and
+[docs/column-widths.html](docs/column-widths.html) shows columns the reader
+dragged wider than the file says they are.
 [docs/sheet-geometry.html](docs/sheet-geometry.html) shows a sheet laid out by
 its own column widths, row heights and merged regions.
 [docs/cell-styles.html](docs/cell-styles.html) shows a report whose header,
 italic notes and filled blank cell are drawn with the workbook's own styling,
 [docs/hidden-rows.html](docs/hidden-rows.html) shows a sheet whose hidden
 column and rows are collapsed and then revealed,
+[docs/view-menu.html](docs/view-menu.html) shows the menu that gathers the
+hidden-rows switch with the two jumps, over a sheet that freezes and hides at
+once,
 [docs/formulas.html](docs/formulas.html) shows a calculated column marked and
-its formula in the readout, and
+its formula in the readout, [docs/dependencies.html](docs/dependencies.html)
+shows the chain around one of its figures — the two cells it multiplies and the
+total that sums it — and
 [docs/hidden-value.html](docs/hidden-value.html) shows the grid marking a zero
 and a text value that their own number formats hide.
 
@@ -773,8 +828,11 @@ is behind the blank can be seen too. That same sheet reports a hidden column
 and a hidden block of rows, so the collapsed seams, the toolbar that reveals
 them and the striped wash they get when shown can all be exercised without a
 workbook, and its calculated `Revenue` column carries a formula, so the corner
-mark, the tooltip and the readout's aside can be seen too. Its *Wide sheet* freezes its first row and first
-column, so the frozen panes can be scrolled and clicked without a workbook. Its mock has an
+mark, the tooltip and the readout's aside can be seen too, with a total under
+that column for the dependency panel to name as a dependent. Its *Wide sheet* freezes its first row and first
+column and hides one row and one column of its own, so the frozen panes can be
+scrolled and clicked without a workbook and every action in the view menu has
+something to act on. Its mock has an
 Excel workbook and, at `ui-harness.html#csv`, a
 200-row delimited file with twelve columns — enough rows and columns to scroll
 both ways, so the pinned first row and the text bar can be seen working. At
@@ -782,9 +840,12 @@ both ways, so the pinned first row and the text bar can be seen working. At
 column names, so a header other than the first record can be chosen, the strip
 followed as it pins, the column heads relabelled with it, and a click on one of
 those names sorting the records below the header — a second click reversing
-them, with the arrows and the status bar to show for it. The mock also keeps
-each file's sheet, cell and scroll offset the way the app does, so closing the
-file and opening it again lands back where it was left. At `ui-harness.html#legacy` a third file reports
+them, with the arrows and the status bar to show for it, and closing the file
+and opening it again landing back in that order, since the mock remembers the
+choice beside the header row the way the app does. The mock also keeps
+each file's sheet, cell, scroll offset and dragged column widths the way the
+app does, so closing the file and opening it again lands back where it was
+left, with the columns as wide as they were dragged. At `ui-harness.html#legacy` a third file reports
 itself as Windows-1252 read nobody chose, so *Save a copy as UTF-8* is on offer
 and its success message can be seen; at `ui-harness.html#legacy-jp` a Japanese
 export reports itself as Shift_JIS, with the picker still on Auto and every

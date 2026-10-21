@@ -603,6 +603,7 @@ mod tests {
             format: "Excel Workbook (xlsx)".into(),
             file_size: 0,
             sheets: vec![SheetData {
+                original_order: None,
                 name: "Report".into(),
                 rows,
                 cols: 4,
@@ -783,6 +784,7 @@ mod tests {
             format: "Excel Workbook (xlsx)".into(),
             file_size: 0,
             sheets: vec![SheetData {
+                original_order: None,
                 name: "Formatting".into(),
                 rows,
                 cols: 6,
@@ -975,6 +977,7 @@ mod tests {
             format: "Excel Workbook (xlsx)".into(),
             file_size: 0,
             sheets: vec![SheetData {
+                original_order: None,
                 name: "Styled".into(),
                 rows,
                 cols: 3,
@@ -1143,6 +1146,7 @@ mod tests {
             format: "Excel Workbook (xlsx)".into(),
             file_size: 0,
             sheets: vec![SheetData {
+                original_order: None,
                 name: "Geometry".into(),
                 rows,
                 cols: 4,
@@ -1257,6 +1261,7 @@ mod tests {
             format: "Excel Workbook (xlsx)".into(),
             file_size: 0,
             sheets: vec![SheetData {
+                original_order: None,
                 name: "Sections".into(),
                 rows: vec![
                     vec![C::Text("Amount".into()), C::Text("Share".into())],
@@ -1399,6 +1404,7 @@ mod tests {
             format: "Excel Workbook (xlsx)".into(),
             file_size: 0,
             sheets: vec![SheetData {
+                original_order: None,
                 name: "Report".into(),
                 rows,
                 cols: 3,
@@ -1514,6 +1520,7 @@ mod tests {
             format: "Excel Workbook (xlsx)".into(),
             file_size: 0,
             sheets: vec![SheetData {
+                original_order: None,
                 name: "Report".into(),
                 rows,
                 cols: 3,
@@ -1628,6 +1635,7 @@ mod tests {
             format: "Excel Workbook (xlsx)".into(),
             file_size: 0,
             sheets: vec![SheetData {
+                original_order: None,
                 name: "Sections".into(),
                 rows,
                 cols: 2,
@@ -1717,6 +1725,7 @@ mod tests {
             format: "Excel Workbook (xlsx)".into(),
             file_size: 0,
             sheets: vec![SheetData {
+                original_order: None,
                 name: "Literal".into(),
                 rows: vec![vec![C::Text("whatever".into())]],
                 cols: 1,
@@ -1772,6 +1781,7 @@ mod tests {
             format: "Excel Workbook (xlsx)".into(),
             file_size: 0,
             sheets: vec![SheetData {
+                original_order: None,
                 name: "Hidden".into(),
                 rows: vec![vec![C::Text("anything".into()), C::Float(7.0)]],
                 cols: 2,

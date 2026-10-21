@@ -351,6 +351,7 @@ pub fn load_with(
         format: format_label(path),
         file_size: meta.len(),
         sheets: vec![SheetData {
+            original_order: None,
             name: sheet_name(path),
             rows: table.rows,
             cols,
@@ -373,9 +374,11 @@ pub fn load_with(
             delimiter_chosen: dialect.delimiter.is_some(),
             encoding_chosen: dialect.encoding.is_some(),
             undecodable,
-            // The row pinned as the header is a choice about the view, kept
-            // per file by `text_prefs`; a fresh parse knows nothing of it.
+            // The row pinned as the header and the order the records were
+            // left in are choices about the view, kept per file by
+            // `text_prefs`; a fresh parse knows nothing of either.
             header_row: None,
+            sort: None,
         }),
     })
 }

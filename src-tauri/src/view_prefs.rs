@@ -8,6 +8,11 @@
 //! the same path starts at its own top-left instead of inheriting a position
 //! that belonged to another.
 //!
+//! The column widths the reader dragged belong to the same memory: widening a
+//! column is work done to read the file, and it is the same work next time. They
+//! are stored per sheet inside the entry, so switching tabs gives each tab back
+//! its own widths rather than lending one sheet's shape to another.
+//!
 //! This is a convenience, not a record the reader depends on: a store that
 //! cannot be read or written is ignored, and the file opens at A1 as it would
 //! have without one.
@@ -26,12 +31,23 @@ const STORE_FILE: &str = "views.json";
 /// otherwise lose one of them.
 static LOCK: Mutex<()> = Mutex::new(());
 
+/// The columns a reader dragged on one sheet, in column order.
+///
+/// Column widths are a sheet's own: a tab with wide description columns is not
+/// a tab with narrow dates, so what was dragged on one is put back only there.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SheetWidths {
+    pub sheet: usize,
+    pub columns: Vec<(u32, f64)>,
+}
+
 /// Where the grid was in one file.
 ///
 /// Rows and columns are the grid's own, counted from zero as it counts them;
 /// `top` and `left` are the scroll offsets in CSS pixels, which is the unit the
-/// body scrolls by.
-#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+/// body scrolls by. `widths` holds the columns the reader dragged, per sheet.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ViewState {
     pub sheet: usize,
@@ -39,6 +55,8 @@ pub struct ViewState {
     pub col: u32,
     pub top: f64,
     pub left: f64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub widths: Vec<SheetWidths>,
 }
 
 /// What a file looked like when its position was remembered.
@@ -103,7 +121,7 @@ pub fn lookup(directory: &Path, path: &Path) -> Option<ViewState> {
         }
         return None;
     }
-    store.files.get(&key).map(|stored| stored.view)
+    store.files.get(&key).map(|stored| stored.view.clone())
 }
 
 /// Remember where `path` was left.
@@ -216,6 +234,7 @@ mod tests {
             col,
             top: 1820.0,
             left: 96.0,
+            widths: Vec::new(),
         }
     }
 
@@ -366,5 +385,58 @@ mod tests {
             Some(3),
             "the active sheet is part of where the file was left"
         );
+    }
+
+    #[test]
+    fn the_widths_a_reader_dragged_travel_with_the_position() {
+        let dir = directory("widths");
+        let path = file(&dir, "report.xlsx");
+        let mut where_we_were = view(40, 3);
+        where_we_were.widths = vec![
+            SheetWidths {
+                sheet: 0,
+                columns: vec![(1, 220.0), (4, 96.0)],
+            },
+            SheetWidths {
+                sheet: 2,
+                columns: vec![(0, 64.0)],
+            },
+        ];
+
+        remember(&dir, &path, where_we_were.clone());
+
+        // A fresh process reads the store back, widths and all.
+        assert_eq!(lookup(&dir, &path), Some(where_we_were.clone()));
+        let store = read(&dir);
+        let stored = store.files.get(&key(&path)).expect("the entry");
+        assert_eq!(stored.view.widths, where_we_were.widths);
+    }
+
+    #[test]
+    fn a_position_without_widths_reads_as_having_none() {
+        let dir = directory("legacy-entry");
+        let path = file(&dir, "report.xlsx");
+        // An entry written before widths were remembered: a position and the
+        // file state, and no `widths` key at all.
+        let mut store = Store::default();
+        store.files.insert(
+            key(&path),
+            Stored {
+                view: view(4, 1),
+                stamp: Stamp::of(&path),
+            },
+        );
+        write(&dir, &store).expect("an old-style entry");
+        let text = std::fs::read_to_string(dir.join(STORE_FILE)).expect("the store");
+        assert!(
+            !text.contains("\"widths\""),
+            "nothing was dragged in this entry"
+        );
+
+        // It still says where the file was left; only the widths are missing,
+        // so the sheet keeps the widths the file itself gives it.
+        let stored = lookup(&dir, &path).expect("a position that is still current");
+        assert_eq!((stored.row, stored.col), (4, 1));
+        assert!(stored.widths.is_empty());
     }
 }

@@ -42,6 +42,58 @@
         <button id="btn-reload" class="btn" type="button" disabled title="Re-read the file from disk">
           Reload
         </button>
+        <!-- One place for the grid's view switches: what the sheet hides, where
+             its data begins, and where the part of the sheet that scrolls
+             starts. The one-click hidden-rows button stays beside it, so the
+             common case stays a single press and the menu is where the rest
+             can be found. -->
+        <div class="menu-anchor">
+          <button
+            id="btn-view"
+            class="btn menu-btn"
+            type="button"
+            aria-haspopup="menu"
+            aria-expanded="false"
+            aria-controls="view-menu"
+            disabled
+          >
+            View
+            <svg class="menu-caret" viewBox="0 0 10 6" aria-hidden="true">
+              <path
+                d="M1 1l4 4 4-4"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.5"
+                stroke-linecap="round"
+              />
+            </svg>
+          </button>
+          <div class="menu" id="view-menu" role="menu" aria-labelledby="btn-view" hidden>
+            <button
+              id="menu-hidden"
+              class="menu-item"
+              type="button"
+              role="menuitemcheckbox"
+              aria-checked="false"
+            >
+              <span class="menu-check" aria-hidden="true"></span>
+              <span class="menu-text">Show hidden rows and columns</span>
+              <span class="menu-note" id="menu-hidden-note"></span>
+            </button>
+            <div class="menu-rule" aria-hidden="true"></div>
+            <button id="menu-data" class="menu-item" type="button" role="menuitem">
+              <span class="menu-check" aria-hidden="true"></span>
+              <span class="menu-text">Jump to data</span>
+              <span class="menu-note">Ctrl+Shift+J</span>
+            </button>
+            <button id="menu-scroll" class="menu-item" type="button" role="menuitem">
+              <span class="menu-check" aria-hidden="true"></span>
+              <span class="menu-text">First scrolling cell</span>
+              <span class="menu-note">Ctrl+Shift+Home</span>
+            </button>
+          </div>
+        </div>
+
         <!-- Appears only when the sheet hides rows or columns: the grid
              collapses them as the file does, and this lays them back out. -->
         <button id="btn-hidden" class="btn" type="button" hidden>
@@ -57,6 +109,17 @@
           <!-- What the file calculates the selected cell from, when it does;
                absent for a cell that holds only a value. -->
           <span class="readout-formula" id="readout-formula" hidden></span>
+          <!-- Opens the chain around the selected formula: what feeds it and
+               what reads it. Shown only for a cell that is calculated. -->
+          <button
+            id="btn-trace"
+            class="readout-trace"
+            type="button"
+            hidden
+            title="Show the cells this formula reads and the cells that read it"
+          >
+            Trace
+          </button>
         </div>
 
         <button id="btn-settings" class="btn btn-icon" type="button" title="Windows integration">
@@ -159,6 +222,15 @@
             aria-label="Row pinned as the header"
           />
         </label>
+        <button
+          id="btn-file-order"
+          class="btn textbar-order"
+          type="button"
+          hidden
+          title="Put the records back in the order the file has them. Nothing is re-read."
+        >
+          File order
+        </button>
         <span class="textbar-detected" id="text-detected"></span>
         <span class="textbar-hint" id="text-hint" hidden></span>
         <button
@@ -251,6 +323,26 @@
           </div>
           <div class="tabs" id="tabs"></div>
         </section>
+        <!-- The chain around the selected cell: the cells its formula reads
+             and the cells that are calculated from it. It floats over the grid
+             so the sheet stays where it is while the chain is followed. -->
+        <aside class="deps" id="deps" hidden aria-label="Cell dependencies">
+          <header class="deps-head">
+            <div class="deps-heading">
+              <span class="deps-title" id="deps-title">—</span>
+              <span class="deps-sub" id="deps-sub"></span>
+            </div>
+            <button
+              id="btn-deps-close"
+              class="btn btn-icon deps-close"
+              type="button"
+              title="Close the dependency view"
+            >
+              ×
+            </button>
+          </header>
+          <div class="deps-body" id="deps-body"></div>
+        </aside>
       </main>
 
       <footer class="statusbar">

@@ -4,6 +4,7 @@
 
 mod associations;
 mod cell_styles;
+mod deps;
 mod formula;
 mod manifest;
 mod model;
@@ -98,7 +99,7 @@ async fn open_workbook(
     let explicit = dialect_explicit.unwrap_or(false);
     let dialect = text_prefs::resolve(requested, &remembered, explicit);
     let requested_path = PathBuf::from(&path);
-    let loaded =
+    let mut loaded =
         tauri::async_runtime::spawn_blocking(move || workbook::load_with(&requested_path, dialect))
             .await
             .map_err(|e| format!("Could not read the file: {e}"))??;
@@ -122,6 +123,17 @@ async fn open_workbook(
         }
     }
 
+    // A delimited table reopens in the order it was left in. The rows are put
+    // back before the grid is told anything, so the first paint is the table
+    // the reader left rather than a re-sort once its cells arrive.
+    let restored_sort = if loaded.text.is_some() {
+        let rows = loaded.sheets.first().map_or(0, |sheet| sheet.rows.len());
+        let cols = loaded.sheets.first().map_or(0, |sheet| sheet.cols);
+        restore_sort(&mut loaded, &remembered, rows, cols)
+    } else {
+        None
+    };
+
     let mut info = loaded.info();
     // A delimited file reopens with the row that was pinned for it last time:
     // the rows above the header do not need finding again. The choice is a view
@@ -129,6 +141,8 @@ async fn open_workbook(
     if let Some(text) = info.text.as_mut() {
         let rows = info.sheets.first().map_or(0, |sheet| sheet.rows);
         text.header_row = stored_header_row(&remembered, rows);
+        // The order the rows are already in, for the strip and the status bar.
+        text.sort = restored_sort;
     }
     // And it reopens where it was left: the sheet, the cell and the scroll
     // offset, when the store still has them for this exact file.
@@ -163,22 +177,109 @@ fn fit_view(
         sheet: view.sheet,
         row: view.row.min(last_index(rows)),
         col: view.col.min(last_index(cols)),
-        top: if view.top.is_finite() {
-            view.top.max(0.0)
-        } else {
-            0.0
-        },
-        left: if view.left.is_finite() {
-            view.left.max(0.0)
-        } else {
-            0.0
-        },
+        top: offset(view.top),
+        left: offset(view.left),
+        widths: fit_widths(view.widths, sheets),
     })
+}
+
+/// How narrow and how wide a dragged column may be, in CSS pixels.
+///
+/// The grid clamps a drag to the same range, so a stored value outside it came
+/// from a hand-edited store rather than from the pointer.
+const MIN_COL_WIDTH: f64 = 24.0;
+const MAX_COL_WIDTH: f64 = 1600.0;
+
+/// Enough dragged columns to have shaped a table by hand, without letting a
+/// damaged store grow one view entry without bound.
+const MAX_WIDTHS_PER_SHEET: usize = 512;
+
+/// The column widths a stored view can still put back.
+///
+/// A sheet the workbook no longer has is not one whose widths can be restored,
+/// and neither is a column past the end of a sheet that turned out narrower —
+/// the same fitting the position itself gets. The list is sorted by column and
+/// deduplicated so the grid's layout walk stays linear, whatever the store says.
+fn fit_widths(
+    widths: Vec<view_prefs::SheetWidths>,
+    sheets: &[(usize, usize)],
+) -> Vec<view_prefs::SheetWidths> {
+    let mut fitted: Vec<view_prefs::SheetWidths> = widths
+        .into_iter()
+        .filter_map(|sheet| {
+            let &(_, cols) = sheets.get(sheet.sheet)?;
+            let mut columns: Vec<(u32, f64)> = sheet
+                .columns
+                .into_iter()
+                .filter(|&(col, pixels)| {
+                    usize::try_from(col).is_ok_and(|col| col < cols) && pixels.is_finite()
+                })
+                .map(|(col, pixels)| (col, pixels.clamp(MIN_COL_WIDTH, MAX_COL_WIDTH)))
+                .collect();
+            columns.sort_by_key(|&(col, _)| col);
+            columns.dedup_by_key(|entry| entry.0);
+            columns.truncate(MAX_WIDTHS_PER_SHEET);
+            (!columns.is_empty()).then_some(view_prefs::SheetWidths {
+                sheet: sheet.sheet,
+                columns,
+            })
+        })
+        .collect();
+    // One entry per sheet, whatever the store listed, and in sheet order so
+    // two files' views compare equal however they were written.
+    fitted.sort_by_key(|sheet| sheet.sheet);
+    fitted.dedup_by_key(|sheet| sheet.sheet);
+    fitted
+}
+
+/// A scroll offset the grid can be put back at: a number, and not a negative
+/// one, which is the top or left edge anyway.
+fn offset(offset: f64) -> f64 {
+    if offset.is_finite() {
+        offset.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// The last index of an axis `count` long, as the grid numbers it.
 fn last_index(count: usize) -> u32 {
     u32::try_from(count.saturating_sub(1)).unwrap_or(u32::MAX)
+}
+
+/// Put the rows of a delimited file back in the order they were left in.
+///
+/// Only a delimited file has an order to restore, and only for a column it
+/// still has: a re-export that dropped the column opens in its own order
+/// rather than refusing to open. The rows above the header keep their places,
+/// exactly as they did when the order was chosen, and the sort itself is the
+/// one the grid asks for by hand.
+fn restore_sort(
+    loaded: &mut model::LoadedWorkbook,
+    entry: &text_prefs::Entry,
+    rows: usize,
+    cols: usize,
+) -> Option<text_prefs::SortChoice> {
+    let sort = entry.sort.clone()?;
+    if sort.column >= cols {
+        return None;
+    }
+    loaded
+        .sort_text(0, sort_header(entry, rows), sort.column, sort.descending)
+        .ok()?;
+    Some(sort)
+}
+
+/// The header row a sort starts below, as the grid will pin it.
+///
+/// Nobody having chosen one means the first record pins, which is the grid's
+/// own default; a file left unpinned sorts from its first row.
+fn sort_header(entry: &text_prefs::Entry, rows: usize) -> Option<usize> {
+    match stored_header_row(entry, rows) {
+        None => Some(0),
+        Some(None) => None,
+        Some(Some(row)) => Some(row),
+    }
 }
 
 /// The header row a stored choice names, as the UI reads it.
@@ -294,21 +395,14 @@ fn get_rows(
 
 /// Remember where the open file was left.
 ///
-/// The grid calls this as the selection, the sheet or the scroll offset
-/// changes, so the next open of the same file starts there. What arrives from
-/// the webview is fitted to the sheet it names rather than trusted: a position
-/// past the end of the sheet is not one, and neither is a scroll offset that is
-/// not a number.
+/// The grid calls this as the selection, the sheet, the scroll offset or a
+/// column's width changes, so the next open of the same file starts there.
+/// What arrives from the webview is fitted to the sheet it names rather than
+/// trusted: a position past the end of the sheet is not one, neither is a
+/// scroll offset that is not a number, and a width for a column the sheet does
+/// not have is dropped.
 #[tauri::command]
-fn remember_view(
-    sheet: usize,
-    row: u32,
-    col: u32,
-    top: f64,
-    left: f64,
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-) {
+fn remember_view(view: view_prefs::ViewState, app: tauri::AppHandle, state: State<'_, AppState>) {
     let Ok(directory) = app.path().app_local_data_dir() else {
         return;
     };
@@ -323,35 +417,127 @@ fn remember_view(
     }) else {
         return;
     };
-    let requested = view_prefs::ViewState {
-        sheet,
-        row,
-        col,
-        top,
-        left,
-    };
     // A view of a sheet that is not there is not this workbook's view.
-    let Some(view) = fit_view(requested, &extents) else {
+    let Some(view) = fit_view(view, &extents) else {
         return;
     };
     view_prefs::remember(&directory, Path::new(&path), view);
+}
+
+/// The cells a calculation reads, and the cells that read it.
+///
+/// The chain is followed on the sheet the cell is on: a reference to another
+/// sheet is a real dependency, but not one this view can show without becoming
+/// a workbook browser, so it is left out rather than shown as a cell here that
+/// it is not.
+#[tauri::command]
+fn cell_dependencies(
+    sheet: usize,
+    row: usize,
+    col: usize,
+    state: State<'_, AppState>,
+) -> Result<deps::Dependencies, String> {
+    state.with_workbook(|wb| {
+        wb.sheets
+            .get(sheet)
+            .map(|data| deps::of(data, row, col))
+            .ok_or_else(|| "That worksheet no longer exists.".to_string())
+    })?
 }
 
 /// Sort a delimited file's records by one of its named columns.
 ///
 /// `headerRow` is the row the grid has pinned, so the records start below it
 /// and a title or note above it is left alone. The file on disk is never
-/// touched: this orders the rows in memory, and a reload reads them back.
+/// touched: this orders the rows in memory, and the order is remembered for
+/// this file — `label` is the column's name as the strip showed it, so the next
+/// open can say what the table is ordered by without reading a cell first.
 #[tauri::command]
 fn sort_text_rows(
     sheet: usize,
     header_row: Option<usize>,
     column: usize,
     descending: bool,
+    label: String,
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    state.with_workbook_mut(|wb| wb.sort_text(sheet, header_row, column, descending))?
+    state.with_workbook_mut(|wb| wb.sort_text(sheet, header_row, column, descending))??;
+    // The order is a view of the file, but one worth coming back to: it is kept
+    // beside the dialect and the header row, on the same terms.
+    let Ok(directory) = app.path().app_local_data_dir() else {
+        return Ok(());
+    };
+    let Ok((path, cols)) = state.with_workbook(|wb| {
+        (
+            wb.path.clone(),
+            wb.sheets.get(sheet).map_or(0, |data| data.cols),
+        )
+    }) else {
+        return Ok(());
+    };
+    // A column the sheet does not have is not an order it can reopen in.
+    if column >= cols {
+        return Ok(());
+    }
+    text_prefs::remember_sort(
+        &directory,
+        Path::new(&path),
+        text_prefs::SortChoice {
+            column,
+            descending,
+            label: sort_label(&label),
+        },
+    );
+    Ok(())
 }
+
+/// Put a delimited table back in the order its file has.
+///
+/// The rows are moved back in memory — nothing is read again, so the selection,
+/// the scroll and the tiles that are already loaded all stay where they are —
+/// and the chosen order is forgotten, since the file's own order is what a
+/// first open does anyway.
+#[tauri::command]
+fn restore_text_order(
+    sheet: usize,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let moved = state.with_workbook_mut(|wb| {
+        if wb.text.is_none() {
+            return Err("Only a delimited text file has a file order.".to_string());
+        }
+        let data = wb
+            .sheets
+            .get_mut(sheet)
+            .ok_or_else(|| "That worksheet no longer exists.".to_string())?;
+        Ok(data.restore_file_order())
+    })??;
+    // The file's own order is the default, so there is nothing left to remember
+    // once it is back: the next open is the file's too.
+    if let Ok(directory) = app.path().app_local_data_dir() {
+        if let Ok(path) = state.with_workbook(|wb| wb.path.clone()) {
+            text_prefs::forget_sort(&directory, Path::new(&path));
+        }
+    }
+    Ok(moved)
+}
+
+/// The column name stored with an order: one line, and short enough that a
+/// hand-written request cannot fill the store with it.
+fn sort_label(label: &str) -> String {
+    label
+        .trim()
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(MAX_SORT_LABEL)
+        .collect()
+}
+
+/// Long enough for any column name a spreadsheet allows, and short enough that
+/// a store of them stays a store of choices.
+const MAX_SORT_LABEL: usize = 120;
 
 /// Write the open workbook out as OpenDocument (.ods).
 #[tauri::command]
@@ -663,7 +849,9 @@ fn main() {
             save_utf8_copy,
             remember_header,
             remember_view,
+            cell_dependencies,
             sort_text_rows,
+            restore_text_order,
             association_status,
             install_associations,
             remove_associations,
@@ -727,18 +915,19 @@ mod tests {
             col: 6,
             top: 1200.0,
             left: 64.0,
+            widths: Vec::new(),
         };
 
         // The second sheet has ten rows and two columns, so the cell is pulled
         // back to one it has; the sheet itself is still the one to reopen.
-        let fitted = fit_view(remembered, &sheets).expect("a sheet the workbook has");
+        let fitted = fit_view(remembered.clone(), &sheets).expect("a sheet the workbook has");
         assert_eq!((fitted.sheet, fitted.row, fitted.col), (1, 9, 1));
         assert_eq!((fitted.top, fitted.left), (1200.0, 64.0));
 
         // A sheet the workbook no longer has is not a place to reopen at.
         let gone = view_prefs::ViewState {
             sheet: 2,
-            ..remembered
+            ..remembered.clone()
         };
         assert_eq!(fit_view(gone, &sheets), None);
 
@@ -751,6 +940,117 @@ mod tests {
         };
         let fitted = fit_view(broken, &sheets).expect("the sheet is still there");
         assert_eq!((fitted.top, fitted.left), (0.0, 0.0));
+    }
+
+    #[test]
+    fn dragged_widths_are_fitted_to_the_sheets_and_columns_that_are_there() {
+        let sheets = [(50, 8), (10, 2)];
+        let widths = vec![
+            view_prefs::SheetWidths {
+                sheet: 1,
+                columns: vec![(1, 240.0), (5, 90.0), (0, 12.0), (1, 300.0), (0, f64::NAN)],
+            },
+            view_prefs::SheetWidths {
+                sheet: 4,
+                columns: vec![(0, 200.0)],
+            },
+        ];
+
+        let fitted = fit_widths(widths, &sheets);
+        // Sheet 4 is no longer in the workbook and column 5 is past the end of
+        // sheet 1; the NaN is not a width, the 12 px is widened to the
+        // narrowest a drag can go, and a repeated column keeps its first entry
+        // rather than making the grid lay the sheet out twice.
+        assert_eq!(
+            fitted,
+            [view_prefs::SheetWidths {
+                sheet: 1,
+                columns: vec![(0, MIN_COL_WIDTH), (1, 240.0)],
+            }]
+        );
+    }
+
+    #[test]
+    fn a_sort_starts_below_the_header_the_grid_pins() {
+        // Nobody chose a header, so the first record pins and the records are
+        // the rows below it — the grid's own default.
+        assert_eq!(sort_header(&text_prefs::Entry::default(), 5), Some(0));
+
+        // Left unpinned on purpose: the whole file is records.
+        let unpinned = text_prefs::Entry {
+            header_row: Some(None),
+            ..text_prefs::Entry::default()
+        };
+        assert_eq!(sort_header(&unpinned, 5), None);
+
+        let pinned = text_prefs::Entry {
+            header_row: Some(Some(2)),
+            ..text_prefs::Entry::default()
+        };
+        assert_eq!(sort_header(&pinned, 5), Some(2));
+
+        // A row the file no longer has is not a header, so the first record
+        // pins again rather than the sort starting past the end.
+        assert_eq!(sort_header(&pinned, 2), Some(0));
+    }
+
+    #[test]
+    fn a_remembered_order_is_put_back_when_the_file_opens() {
+        let dir = std::env::temp_dir().join("excelscry-sort-restore");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a directory for the fixture");
+        let path = dir.join("report.csv");
+        std::fs::write(&path, "Units,Region\n9,North\n10,South\n2,East\n").expect("the fixture");
+
+        let mut loaded =
+            workbook::load_with(&path, text_table::Dialect::default()).expect("a delimited file");
+        let rows = loaded.sheets.first().map_or(0, |sheet| sheet.rows.len());
+        let cols = loaded.sheets.first().map_or(0, |sheet| sheet.cols);
+        let entry = text_prefs::Entry {
+            sort: Some(text_prefs::SortChoice {
+                column: 0,
+                descending: true,
+                label: "Units".to_string(),
+            }),
+            ..text_prefs::Entry::default()
+        };
+
+        let restored = restore_sort(&mut loaded, &entry, rows, cols).expect("the order comes back");
+        assert_eq!((restored.column, restored.descending), (0, true));
+        // The first record is the header — nobody chose one — so the rows
+        // below it are the records the order applies to, largest first.
+        let units: Vec<String> = loaded.sheets[0].rows[1..]
+            .iter()
+            .map(|row| row[0].display())
+            .collect();
+        assert_eq!(units, ["10", "9", "2"]);
+
+        // A file that opened sorted can still be put back in its own order:
+        // the sort the open path applied left the same trail as a click does.
+        assert!(loaded.sheets[0].restore_file_order());
+        let units: Vec<String> = loaded.sheets[0].rows[1..]
+            .iter()
+            .map(|row| row[0].display())
+            .collect();
+        assert_eq!(units, ["9", "10", "2"], "the order the file has");
+
+        // A column a re-export dropped is not an order the file can reopen in.
+        let gone = text_prefs::Entry {
+            sort: Some(text_prefs::SortChoice {
+                column: 9,
+                descending: true,
+                label: "Dropped".to_string(),
+            }),
+            ..text_prefs::Entry::default()
+        };
+        assert_eq!(restore_sort(&mut loaded, &gone, rows, cols), None);
+    }
+
+    #[test]
+    fn a_stored_column_name_is_one_short_line() {
+        assert_eq!(sort_label("  Units\n "), "Units");
+        assert_eq!(sort_label("a\tb"), "ab");
+        assert_eq!(sort_label(&"x".repeat(500)).len(), MAX_SORT_LABEL);
     }
 
     #[test]

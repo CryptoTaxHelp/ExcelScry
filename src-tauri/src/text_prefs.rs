@@ -16,6 +16,12 @@
 //! the same terms: an export replaced by a different one starts again from its
 //! own first record.
 //!
+//! So does the order the records were put in. Sorting a table is work done to
+//! read it — finding the biggest month, the newest order — and coming back to
+//! the file a week later to find it in export order means doing that work
+//! again. The column, the direction and the column's name as the strip showed
+//! it are kept beside the dialect and the header row.
+//!
 //! This is a convenience, not a record the reader depends on: a store that
 //! cannot be read or written is ignored, and the file opens with detection as
 //! it would have without one.
@@ -35,6 +41,21 @@ const STORE_FILE: &str = "text-dialects.json";
 /// One writer at a time: a read-modify-write from two opens at once would
 /// otherwise lose one of them.
 static LOCK: Mutex<()> = Mutex::new(());
+
+/// The order a delimited file's records were left in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SortChoice {
+    /// The column the records are ordered by, counted from zero as the grid
+    /// counts them.
+    pub column: usize,
+    pub descending: bool,
+    /// The column's name as the strip showed it when the order was chosen, so
+    /// the status bar can say what the table is ordered by before the cells it
+    /// is read from have arrived. Absent in an entry written without one.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub label: String,
+}
 
 /// The choices remembered for one file. Each is optional because the user may
 /// have fixed only the delimiter, leaving the encoding to detection.
@@ -56,6 +77,9 @@ pub struct Entry {
         skip_serializing_if = "Option::is_none"
     )]
     pub header_row: Option<Option<usize>>,
+    /// The order the records were left in, when one was chosen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort: Option<SortChoice>,
 }
 
 /// Read a field that is absent, `null`, or a value, as the three things they
@@ -79,11 +103,15 @@ impl Entry {
             delimiter: dialect.delimiter.map(|chosen| chosen.label().to_string()),
             encoding: dialect.encoding.map(|chosen| chosen.label().to_string()),
             header_row: None,
+            sort: None,
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.delimiter.is_none() && self.encoding.is_none() && self.header_row.is_none()
+        self.delimiter.is_none()
+            && self.encoding.is_none()
+            && self.header_row.is_none()
+            && self.sort.is_none()
     }
 
     fn delimiter(&self) -> Option<Delimiter> {
@@ -191,17 +219,23 @@ pub fn remember(directory: &Path, path: &Path, entry: Entry) {
     // that still describes this file is worth carrying over: one left by a
     // different file at the same path is not this file's header.
     let mut entry = entry;
+    let previous = store
+        .files
+        .get(&key)
+        .filter(|stored| {
+            stored
+                .stamp
+                .as_ref()
+                .is_some_and(|stamp| stamp.matches(path))
+        })
+        .map(|stored| stored.entry.clone());
     if entry.header_row.is_none() {
-        entry.header_row = store
-            .files
-            .get(&key)
-            .filter(|stored| {
-                stored
-                    .stamp
-                    .as_ref()
-                    .is_some_and(|stamp| stamp.matches(path))
-            })
-            .and_then(|stored| stored.entry.header_row);
+        entry.header_row = previous.as_ref().and_then(|stored| stored.header_row);
+    }
+    // Re-reading a file with another delimiter or encoding changes how it is
+    // read, not which order the records were put in.
+    if entry.sort.is_none() {
+        entry.sort = previous.and_then(|stored| stored.sort);
     }
     if entry.is_empty() {
         store.files.remove(&key);
@@ -220,6 +254,60 @@ pub fn remember(directory: &Path, path: &Path, entry: Entry) {
     }
     // A choice that cannot be written still applies to this session; failing to
     // open the file over it would be worse than forgetting it next time.
+    let _ = write(directory, &store);
+}
+
+/// Remember the order chosen for `path`, keeping how the file is read.
+///
+/// An entry left by a different file at the same path is not carried over: its
+/// columns are not this file's, and neither is its order.
+pub fn remember_sort(directory: &Path, path: &Path, sort: SortChoice) {
+    let _guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut store = read(directory);
+    let key = key(path);
+    let Some(stamp) = Stamp::of(path) else {
+        // Without a stamp this could never be shown to belong to the file.
+        store.files.remove(&key);
+        let _ = write(directory, &store);
+        return;
+    };
+    let mut entry = store
+        .files
+        .get(&key)
+        .filter(|stored| stored.stamp.as_ref() == Some(&stamp))
+        .map(|stored| stored.entry.clone())
+        .unwrap_or_default();
+    entry.sort = Some(sort);
+    store.files.insert(
+        key,
+        Stored {
+            entry,
+            stamp: Some(stamp),
+        },
+    );
+    // An order that cannot be written still applies to this session; failing to
+    // open the file over it would be worse than forgetting it next time.
+    let _ = write(directory, &store);
+}
+
+/// Forget the order chosen for `path`, keeping how the file is read.
+///
+/// The file's own order is the default, so going back to it leaves nothing to
+/// remember. An entry that said nothing but which order the records were in
+/// goes with it rather than lingering as an empty one.
+pub fn forget_sort(directory: &Path, path: &Path) {
+    let _guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut store = read(directory);
+    let key = key(path);
+    let Some(stored) = store.files.get_mut(&key) else {
+        return;
+    };
+    if stored.entry.sort.take().is_none() {
+        return;
+    }
+    if stored.entry.is_empty() {
+        store.files.remove(&key);
+    }
     let _ = write(directory, &store);
 }
 
@@ -339,6 +427,15 @@ mod tests {
             delimiter: delimiter.map(str::to_string),
             encoding: encoding.map(str::to_string),
             header_row: None,
+            sort: None,
+        }
+    }
+
+    fn by_units() -> SortChoice {
+        SortChoice {
+            column: 3,
+            descending: true,
+            label: "Units".to_string(),
         }
     }
 
@@ -395,6 +492,83 @@ mod tests {
             lookup(&dir, &path),
             with_header(chosen(Some("tab"), None), Some(3))
         );
+    }
+
+    #[test]
+    fn the_order_the_records_were_left_in_is_remembered() {
+        let dir = directory("sort");
+        let path = file(&dir, "report.csv");
+        remember_sort(&dir, &path, by_units());
+
+        assert_eq!(lookup(&dir, &path).sort, Some(by_units()));
+
+        // Re-reading the file with another delimiter changes how it is read,
+        // not the order its records are in.
+        remember(&dir, &path, chosen(Some("semicolon"), None));
+        assert_eq!(lookup(&dir, &path).sort, Some(by_units()));
+
+        // A fresh process reads the file, not a cached map.
+        let store = read(&dir);
+        let stored = store.files.get(&key(&path)).expect("the entry");
+        assert_eq!(stored.entry.sort, Some(by_units()));
+    }
+
+    #[test]
+    fn the_order_and_the_header_are_choices_of_the_same_file() {
+        let dir = directory("sort-and-header");
+        let path = file(&dir, "report.csv");
+        remember_header(&dir, &path, Some(2));
+        remember_sort(&dir, &path, by_units());
+
+        let entry = lookup(&dir, &path);
+        assert_eq!(entry.header_row, Some(Some(2)));
+        assert_eq!(entry.sort, Some(by_units()));
+    }
+
+    #[test]
+    fn going_back_to_the_file_order_forgets_only_the_order() {
+        let dir = directory("forget-sort");
+        let path = file(&dir, "report.csv");
+        remember_header(&dir, &path, Some(2));
+        remember_sort(&dir, &path, by_units());
+
+        forget_sort(&dir, &path);
+
+        let entry = lookup(&dir, &path);
+        assert_eq!(entry.sort, None);
+        assert_eq!(
+            entry.header_row,
+            Some(Some(2)),
+            "the header is still the header"
+        );
+    }
+
+    #[test]
+    fn an_entry_that_only_said_which_order_goes_with_it() {
+        let dir = directory("forget-only-sort");
+        let path = file(&dir, "report.csv");
+        remember_sort(&dir, &path, by_units());
+
+        forget_sort(&dir, &path);
+
+        assert_eq!(lookup(&dir, &path), Entry::default());
+        assert!(
+            read(&dir).files.is_empty(),
+            "there is nothing left to keep, so no empty entry lingers"
+        );
+    }
+
+    #[test]
+    fn an_edited_file_forgets_the_order_it_was_left_in() {
+        let dir = directory("edited-sort");
+        let path = file(&dir, "report.csv");
+        remember_sort(&dir, &path, by_units());
+
+        std::fs::write(&path, b"a;b\nc;d\n").expect("new contents");
+
+        // The columns a new export has are its own, so they are not ordered by
+        // what the old file was sorted on.
+        assert_eq!(lookup(&dir, &path).sort, None);
     }
 
     #[test]

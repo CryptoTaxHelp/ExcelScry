@@ -38,6 +38,12 @@ function cssNumber(name, fallback) {
 const ROW_H = cssNumber("--rowh", 24);
 const COL_W = cssNumber("--colw", 112);
 
+// How narrow and how wide a dragged column may be. A column narrower than the
+// strip's own letter is unreadable and one past this is off the screen; the
+// Rust side clamps a remembered width to the same range.
+const MIN_COL_W = 24;
+const MAX_COL_W = 1600;
+
 // The grid is laid out from the sheet's own geometry when it has one. `xs` and
 // `ys` are prefix sums of column widths and row heights: cell i starts at
 // xs[i] / ys[i], so a million-row sheet costs two typed arrays rather than a
@@ -70,6 +76,73 @@ function mergeOrigin(row, col) {
 
 const colWidth = (col) => geom.xs[col + 1] - geom.xs[col];
 const rowHeight = (row) => geom.ys[row + 1] - geom.ys[row];
+
+/** The widths the reader dragged on one sheet, as a `col -> pixels` map. */
+function draggedWidths(sheet = state.sheet) {
+  if (!state.widths[sheet]) state.widths[sheet] = {};
+  return state.widths[sheet];
+}
+
+/**
+ * The `[[col, px], ...]` layout for one sheet, with the reader's drags laid
+ * over the widths the file itself carries.
+ *
+ * Both lists are sparse and in column order, so a sheet that sizes a handful of
+ * columns stays cheap to lay out, and a column that is neither named keeps the
+ * sheet's own default width.
+ */
+function effectiveWidths(sheet) {
+  const fromFile = sheet && sheet.colWidths ? sheet.colWidths : [];
+  const dragged = draggedWidths();
+  const columns = Object.keys(dragged);
+  if (columns.length === 0) return fromFile;
+  const merged = new Map(fromFile.map(([col, pixels]) => [col, pixels]));
+  for (const column of columns) {
+    const col = Number(column);
+    if (Number.isInteger(col)) merged.set(col, dragged[column]);
+  }
+  return [...merged.entries()].sort((a, b) => a[0] - b[0]);
+}
+
+/**
+ * The dragged widths a remembered view carries, as this file's starting map.
+ *
+ * The store holds one entry per sheet, `{ sheet, columns: [[col, px], ...] }`,
+ * which becomes `widths[sheet][col]` here — the shape the grid lays out from.
+ */
+function widthsFromView(view) {
+  const widths = {};
+  if (!view || !Array.isArray(view.widths)) return widths;
+  for (const entry of view.widths) {
+    if (!entry || !Number.isInteger(entry.sheet) || !Array.isArray(entry.columns)) continue;
+    const dragged = {};
+    for (const column of entry.columns) {
+      if (!Array.isArray(column) || column.length !== 2) continue;
+      const [col, pixels] = column;
+      if (Number.isInteger(col) && Number.isFinite(pixels) && pixels > 0) {
+        dragged[col] = pixels;
+      }
+    }
+    if (Object.keys(dragged).length > 0) widths[entry.sheet] = dragged;
+  }
+  return widths;
+}
+
+/** The widths to write back with the position: sparse, sorted, and per sheet. */
+function widthsPayload() {
+  const payload = [];
+  for (const [sheet, dragged] of Object.entries(state.widths)) {
+    const index = Number(sheet);
+    const columns = Object.entries(dragged)
+      .map(([col, pixels]) => [Number(col), Math.round(pixels)])
+      .filter(([col, pixels]) => Number.isInteger(col) && Number.isFinite(pixels))
+      .sort((a, b) => a[0] - b[0]);
+    if (Number.isInteger(index) && columns.length > 0) {
+      payload.push({ sheet: index, columns });
+    }
+  }
+  return payload;
+}
 
 /** Largest index whose start is at or before `value`. */
 function indexAt(edges, value) {
@@ -165,6 +238,10 @@ const state = {
   /** The column a delimited table is ordered by, if any: `{ col, descending,
    *  label }`. A view of the rows, cleared when another file is opened. */
   sort: null,
+  /** Column widths the reader dragged, per sheet, as `widths[sheet][col]` in
+   *  pixels. Seeded from the file's remembered view and written back with the
+   *  reopen position, so the columns come back as wide as they were left. */
+  widths: {},
 };
 
 const els = {
@@ -210,6 +287,12 @@ const els = {
   btnExport: document.getElementById("btn-export"),
   btnReload: document.getElementById("btn-reload"),
   btnHidden: document.getElementById("btn-hidden"),
+  btnView: document.getElementById("btn-view"),
+  viewMenu: document.getElementById("view-menu"),
+  menuHidden: document.getElementById("menu-hidden"),
+  menuHiddenNote: document.getElementById("menu-hidden-note"),
+  menuData: document.getElementById("menu-data"),
+  menuScroll: document.getElementById("menu-scroll"),
   btnSettings: document.getElementById("btn-settings"),
   settings: document.getElementById("settings"),
   textbar: document.getElementById("textbar"),
@@ -218,6 +301,13 @@ const els = {
   textHeader: document.getElementById("text-header"),
   textDetected: document.getElementById("text-detected"),
   textHint: document.getElementById("text-hint"),
+  btnFileOrder: document.getElementById("btn-file-order"),
+  btnTrace: document.getElementById("btn-trace"),
+  deps: document.getElementById("deps"),
+  depsTitle: document.getElementById("deps-title"),
+  depsSub: document.getElementById("deps-sub"),
+  depsBody: document.getElementById("deps-body"),
+  btnDepsClose: document.getElementById("btn-deps-close"),
   btnSaveUtf8: document.getElementById("btn-save-utf8"),
   frozenViewport: document.getElementById("frozen-viewport"),
   frozen: document.getElementById("frozen"),
@@ -315,9 +405,14 @@ function colHeadMarkup(col) {
   const sortAttr = sortable ? ` data-sort="${col}"` : "";
   const sortClass = sortable ? " is-sortable" : "";
   const sortedClass = sorted ? (descending ? " is-sorted is-descending" : " is-sorted") : "";
+  // The right edge of the head is the column's edge: dragging it sets the
+  // width, and the grid remembers it for this file.
+  const grip = `<span class="colhead-grip" data-grip="${col}" title="Drag to resize column ${esc(
+    letter
+  )}; double-click to go back to the file's width"></span>`;
   return `<div class="colhead${active}${named ? " is-named" : ""}${hidden}${sortClass}${sortedClass}"${sortAttr}${title} style="left:${
     geom.xs[col]
-  }px;width:${colWidth(col)}px"><span class="colhead-label">${esc(label)}</span>${arrow}</div>`;
+  }px;width:${colWidth(col)}px"><span class="colhead-label">${esc(label)}</span>${arrow}${grip}</div>`;
 }
 
 /**
@@ -413,6 +508,9 @@ function setBusy(busy, message) {
   els.btnExport.disabled = busy || !state.info;
   els.btnReload.disabled = busy || !state.info;
   els.btnSaveUtf8.disabled = busy || !canSaveUtf8();
+  // A menu that is open across a read would be acting on a file that is gone.
+  if (busy) closeViewMenu();
+  updateViewMenu();
   document.body.style.cursor = busy ? "progress" : "";
   if (message) flash(message);
 }
@@ -461,6 +559,62 @@ function frozenSize(freeze = frozenCounts()) {
     width: freeze.cols > 0 ? geom.xs[freeze.cols] : 0,
     height: freeze.rows > 0 ? geom.ys[freeze.rows] : 0,
   };
+}
+
+/**
+ * The bands pinned over the part of the grid that scrolls.
+ *
+ * A workbook pins with a freeze; a delimited file pins its header row, which is
+ * a band of its own above the records. Neither belongs to the scrolling area,
+ * so both have to be cleared by anything that puts a cell at its top.
+ */
+function pinnedBands() {
+  const freeze = frozenCounts();
+  const header = pinnedRow();
+  const size = frozenSize(freeze);
+  return {
+    width: size.width,
+    height: size.height + (header === null ? 0 : rowHeight(header)),
+  };
+}
+
+/**
+ * The cell a jump to the data should land on.
+ *
+ * A report often begins below a title and right of an empty margin, so A1 is
+ * not the data; the file says where its first used row and column are. A
+ * delimited file's first used row is the record pinned as its header, so the
+ * data starts at the first record below that rather than on the names.
+ */
+function dataStart() {
+  const sheet = currentSheet();
+  if (!sheet || realRows() === 0) return null;
+  const header = pinnedRow();
+  const firstRow = Number.isInteger(sheet.firstUsedRow) ? sheet.firstUsedRow : null;
+  const firstCol = Number.isInteger(sheet.firstUsedCol) ? sheet.firstUsedCol : null;
+  if (firstRow === null && firstCol === null) return null;
+  let row = firstRow === null ? 0 : firstRow;
+  if (header !== null && row <= header) row = header + 1;
+  if (row >= realRows()) return null;
+  const col = firstCol === null ? 0 : firstCol;
+  return { row, col: clamp(col, 0, Math.max(realCols() - 1, 0)) };
+}
+
+/**
+ * Put a cell at the top-left of the part of the grid that scrolls.
+ *
+ * Scrolling a cell *into view* moves the body only as far as it must, which
+ * leaves a jump landing at the bottom edge of the pane. A jump means the cell
+ * should start the view — and with rows or columns pinned over the body, that
+ * start is one band down and across from the body's own origin, or the cell
+ * would sit underneath the band it was scrolled under.
+ */
+function placeAtScrollingOrigin(row, col) {
+  const bands = pinnedBands();
+  els.body.scrollTop = Math.max(0, geom.ys[row] - bands.height);
+  els.body.scrollLeft = Math.max(0, geom.xs[col] - bands.width);
+  scheduleViewSave();
+  scheduleRender();
 }
 
 /**
@@ -574,7 +728,7 @@ function rebuildGeometry() {
   const sheet = currentSheet();
   const cols = gridCols();
   const rows = gridRows();
-  const widths = sheet && sheet.colWidths ? sheet.colWidths : [];
+  const widths = effectiveWidths(sheet);
   const heights = sheet && sheet.rowHeights ? sheet.rowHeights : [];
   const defaultCol = Number.isFinite(sheet && sheet.defaultColWidth)
     ? sheet.defaultColWidth
@@ -653,6 +807,24 @@ function setShowHidden(on) {
 }
 
 /**
+ * The order a delimited file was left in, as the grid tracks it.
+ *
+ * The Rust side puts the rows back in that order while it reads the file and
+ * sends the choice along with the text info, so the strip's arrow and the
+ * status bar describe the table from the first paint — this is not a second
+ * sort, and the label is the one the strip showed when it was chosen.
+ */
+function sortFromText(text) {
+  const sort = text && text.sort;
+  if (!sort || !Number.isInteger(sort.column)) return null;
+  return {
+    col: sort.column,
+    descending: Boolean(sort.descending),
+    label: typeof sort.label === "string" ? sort.label : "",
+  };
+}
+
+/**
  * Order a delimited table's records by one of its named columns.
  *
  * The Rust side sorts the rows in memory, below the pinned header, so every
@@ -677,6 +849,8 @@ async function sortByColumn(col) {
       headerRow: header,
       column: col,
       descending,
+      // The name the strip shows is what the status bar repeats next session.
+      label,
     });
   } catch (err) {
     flash(String(err), true);
@@ -692,6 +866,40 @@ async function sortByColumn(col) {
   flash(`Sorted by ${label}, ${descending ? "descending" : "ascending"}.`);
 }
 
+/**
+ * The way back to the file's own order, offered only while the records are
+ * sorted: a table already in the order its file has needs no such control.
+ */
+function updateFileOrderButton() {
+  const sorted = Boolean(state.info && state.info.text && state.sort);
+  els.btnFileOrder.hidden = !sorted;
+  els.btnFileOrder.disabled = !sorted || state.busy;
+}
+
+/**
+ * Put the records back in the order the file has them.
+ *
+ * The Rust side moves the rows back in memory, so nothing is parsed again and
+ * the grid keeps its scroll, its selection and the tiles it has loaded. The
+ * chosen order is forgotten there too, so the next open is the file's own.
+ */
+async function restoreFileOrder() {
+  if (!isTextTable() || state.busy || !state.sort) return;
+  try {
+    await invoke("restore_text_order", { sheet: state.sheet });
+  } catch (err) {
+    flash(String(err), true);
+    return;
+  }
+  state.sort = null;
+  // The rows themselves moved, so every cached tile is stale; the geometry, the
+  // header and the hidden rows are unchanged.
+  resetTiles();
+  scheduleRender();
+  updateStatus();
+  flash("Back in the file's own order.");
+}
+
 const plural = (count, word) =>
   `${count.toLocaleString()} ${word}${count === 1 ? "" : "s"}`;
 
@@ -701,18 +909,172 @@ function updateHiddenButton() {
   const rows = runCount(hiddenRowRunsOf());
   const cols = runCount(hiddenColRunsOf());
   els.btnHidden.hidden = rows === 0 && cols === 0;
-  if (rows === 0 && cols === 0) return;
+  if (rows === 0 && cols === 0) {
+    updateViewMenu();
+    return;
+  }
   els.btnHidden.classList.toggle("is-on", state.showHidden);
-  const count =
-    rows && cols
-      ? `${plural(rows, "row")} and ${plural(cols, "column")}`
-      : rows
-        ? plural(rows, "row")
-        : plural(cols, "column");
+  const count = countText(rows, cols);
   els.btnHidden.textContent = state.showHidden ? "Hide them again" : `Show ${count}`;
   els.btnHidden.title = state.showHidden
     ? "Collapse the rows and columns this sheet hides"
     : `This sheet hides ${count}; show them in place`;
+  updateViewMenu();
+}
+
+/** `3 rows and 1 column`, for the two places that say how much is hidden. */
+function countText(rows, cols) {
+  return rows && cols
+    ? `${plural(rows, "row")} and ${plural(cols, "column")}`
+    : rows
+      ? plural(rows, "row")
+      : plural(cols, "column");
+}
+
+// --------------------------------------------------------------------------
+// View menu
+// --------------------------------------------------------------------------
+
+/**
+ * The menu the grid's view switches live in.
+ *
+ * Each one is a switch on the view rather than on the file — what the sheet
+ * hides, where its data begins and where the part that scrolls starts — so they
+ * belong together instead of spread along the toolbar, where a button that
+ * appears only for some files reads as one more thing to work out.
+ */
+const viewMenuItems = () => [...els.viewMenu.querySelectorAll(".menu-item")];
+const firstEnabledMenuItem = () =>
+  viewMenuItems().find((item) => !item.disabled) || null;
+
+/**
+ * What the menu says about this sheet, and which of its actions can be taken.
+ *
+ * The notes are the facts a reader would otherwise have to scroll to find: how
+ * much is hidden, and whether there is a freeze at all.
+ */
+function updateViewMenu() {
+  const open = Boolean(state.info) && !state.busy;
+  els.btnView.disabled = !open;
+
+  const rows = runCount(hiddenRowRunsOf());
+  const cols = runCount(hiddenColRunsOf());
+  const hides = rows > 0 || cols > 0;
+  const count = hides ? countText(rows, cols) : "none";
+  els.menuHidden.disabled = !open || !hides;
+  els.menuHidden.setAttribute("aria-checked", String(hides && state.showHidden));
+  els.menuHiddenNote.textContent = count;
+  els.menuHidden.title = !hides
+    ? "This sheet hides nothing."
+    : state.showHidden
+      ? "Collapse the rows and columns this sheet hides"
+      : `This sheet hides ${count}; show them in place`;
+
+  const start = open ? dataStart() : null;
+  els.menuData.disabled = !start;
+  els.menuData.title = start
+    ? `Select ${columnName(start.col)}${start.row + 1}, where the data begins`
+    : "This sheet has no data to jump to.";
+
+  const bands = open ? pinnedBands() : { width: 0, height: 0 };
+  const pinned = bands.width > 0 || bands.height > 0;
+  els.menuScroll.disabled = !open || !pinned;
+  els.menuScroll.title = pinned
+    ? "Select the first cell below and right of what is pinned"
+    : "Nothing is pinned, so the whole grid scrolls.";
+}
+
+function openViewMenu() {
+  if (els.btnView.disabled) return;
+  updateViewMenu();
+  els.viewMenu.hidden = false;
+  els.btnView.setAttribute("aria-expanded", "true");
+  // A menu is a keyboard surface as well as a mouse one: opening it moves the
+  // focus to its first action rather than leaving it behind on the button.
+  const first = firstEnabledMenuItem();
+  if (first) first.focus();
+}
+
+function closeViewMenu({ focusButton = false } = {}) {
+  if (els.viewMenu.hidden) return;
+  els.viewMenu.hidden = true;
+  els.btnView.setAttribute("aria-expanded", "false");
+  if (focusButton) els.btnView.focus();
+}
+
+function toggleViewMenu() {
+  if (els.viewMenu.hidden) openViewMenu();
+  else closeViewMenu();
+}
+
+/** Move the focus down or up the menu, skipping the actions that are off. */
+function stepViewMenu(delta) {
+  const items = viewMenuItems().filter((item) => !item.disabled);
+  if (items.length === 0) return;
+  const at = items.indexOf(document.activeElement);
+  const next = at === -1 ? (delta > 0 ? 0 : items.length - 1) : (at + delta + items.length) % items.length;
+  items[next].focus();
+}
+
+/**
+ * Jump to where the data begins.
+ *
+ * The target is placed at the top-left of the scrolling area, not merely
+ * scrolled into view, so the view starts at the data rather than ending at it.
+ */
+function jumpToData() {
+  const start = dataStart();
+  if (!start) {
+    flash("This sheet has no data to jump to.", true);
+    return;
+  }
+  closeViewMenu();
+  select(start.row, start.col);
+  const { row, col } = state.selection;
+  placeAtScrollingOrigin(row, col);
+  flash(`Jumped to ${columnName(col)}${row + 1}, where the data starts.`);
+}
+
+/** What the pinned bands are, for the message that reports jumping past them. */
+function pinnedBandText() {
+  const freeze = frozenCounts();
+  const header = pinnedRow();
+  const frozen =
+    freeze.rows && freeze.cols
+      ? "frozen rows and columns"
+      : freeze.rows
+        ? "frozen rows"
+        : freeze.cols
+          ? "frozen columns"
+          : "";
+  if (header !== null) return frozen ? `pinned header and ${frozen}` : "pinned header";
+  return frozen;
+}
+
+/**
+ * Jump to the first cell that is neither frozen nor behind a pinned header.
+ *
+ * On a sheet that pins its header, A1 is the header: the cell where the
+ * scrolling area begins is the one worth going to when the reading is about to
+ * start, and it stays at the top-left rather than somewhere under the band.
+ */
+function jumpToScrollingCell() {
+  const bands = pinnedBands();
+  if (bands.width === 0 && bands.height === 0) {
+    flash("Nothing is pinned, so the whole grid scrolls.", true);
+    return;
+  }
+  const freeze = frozenCounts();
+  const header = pinnedRow();
+  const row = freeze.rows > 0 ? freeze.rows : header !== null ? header + 1 : 0;
+  const col = clamp(freeze.cols, 0, Math.max(realCols() - 1, 0));
+  closeViewMenu();
+  select(clamp(row, 0, Math.max(realRows() - 1, 0)), col);
+  const target = state.selection;
+  placeAtScrollingOrigin(target.row, target.col);
+  flash(
+    `Jumped past the ${pinnedBandText()} to ${columnName(target.col)}${target.row + 1}.`
+  );
 }
 
 const tileKey = (tr, tc) => `${tr}:${tc}`;
@@ -1249,6 +1611,111 @@ function layoutSheet() {
 }
 
 // --------------------------------------------------------------------------
+// Column widths
+// --------------------------------------------------------------------------
+
+/** The drag in progress, if the pointer is on a column's edge. */
+let columnResize = null;
+/** Set while the click that ends a drag is still on its way. */
+let swallowHeadClick = false;
+
+/**
+ * Start dragging a column's edge.
+ *
+ * The listeners go on `window` rather than on the grip: the strip is redrawn on
+ * every frame of the drag, and the element the pointer started on does not
+ * outlive the first of those frames.
+ */
+function startColumnResize(event) {
+  if (!state.info || event.button !== 0) return;
+  const grip = event.target.closest("[data-grip]");
+  if (!grip) return;
+  const col = Number(grip.dataset.grip);
+  if (!Number.isInteger(col)) return;
+  event.preventDefault();
+  columnResize = { col, from: event.clientX, width: colWidth(col), moved: false };
+  document.body.classList.add("is-resizing");
+  window.addEventListener("pointermove", moveColumnResize);
+  window.addEventListener("pointerup", endColumnResize);
+  window.addEventListener("pointercancel", endColumnResize);
+}
+
+function moveColumnResize(event) {
+  if (!columnResize) return;
+  const delta = event.clientX - columnResize.from;
+  // A press with no travel is a click, not a width: it should not change one.
+  if (!columnResize.moved && Math.abs(delta) < 2) return;
+  columnResize.moved = true;
+  applyColumnWidth(columnResize.col, columnResize.width + delta);
+}
+
+/**
+ * Draw one column wider or narrower without laying out the whole sheet again.
+ *
+ * `geom.xs` is a prefix sum of widths, so a change to one column moves every
+ * start after it by the same amount and leaves the ones before it alone. Merges
+ * and hidden runs are still where they were; the sheet is not re-measured on
+ * every frame of a drag.
+ */
+function applyColumnWidth(col, width) {
+  const next = clamp(Math.round(width), MIN_COL_W, MAX_COL_W);
+  const delta = next - colWidth(col);
+  if (delta === 0) return;
+  for (let index = col + 1; index < geom.xs.length; index += 1) geom.xs[index] += delta;
+  draggedWidths()[col] = next;
+  layoutSheet();
+  scheduleRender();
+}
+
+function endColumnResize() {
+  window.removeEventListener("pointermove", moveColumnResize);
+  window.removeEventListener("pointerup", endColumnResize);
+  window.removeEventListener("pointercancel", endColumnResize);
+  document.body.classList.remove("is-resizing");
+  const resized = columnResize;
+  columnResize = null;
+  if (!resized || !resized.moved) return;
+  // The click that follows belongs to the drag, not to the head: widening the
+  // column that sorts the table should not also sort it.
+  swallowHeadClick = true;
+  window.setTimeout(() => {
+    swallowHeadClick = false;
+  }, 0);
+  // A drag back to where it started is not a remembered width at all, so this
+  // file keeps opening with the width it itself gives the column.
+  if (Math.round(colWidth(resized.col)) === Math.round(resized.width)) {
+    delete draggedWidths()[resized.col];
+  }
+  // The drag is over, so the sheet is laid out from its geometry again rather
+  // than from a running adjustment to it.
+  rebuildGeometry();
+  layoutSheet();
+  scheduleRender();
+  scheduleViewSave();
+  flash(
+    `Column ${columnName(resized.col)} is ${Math.round(
+      colWidth(resized.col)
+    )} px wide; this file reopens with it that way.`
+  );
+}
+
+/** Put a column back to the width the file gives it. */
+function resetColumnWidth(event) {
+  const grip = event.target.closest("[data-grip]");
+  if (!grip || !state.info) return;
+  const col = Number(grip.dataset.grip);
+  const dragged = draggedWidths();
+  if (!Number.isInteger(col) || !(col in dragged)) return;
+  event.preventDefault();
+  delete dragged[col];
+  rebuildGeometry();
+  layoutSheet();
+  scheduleRender();
+  scheduleViewSave();
+  flash(`Column ${columnName(col)} is back at the width the file gives it.`);
+}
+
+// --------------------------------------------------------------------------
 // Selection
 // --------------------------------------------------------------------------
 
@@ -1286,11 +1753,14 @@ function flushViewSave() {
 function saveView() {
   if (!state.info) return;
   invoke("remember_view", {
-    sheet: state.sheet,
-    row: state.selection.row,
-    col: state.selection.col,
-    top: els.body.scrollTop,
-    left: els.body.scrollLeft,
+    view: {
+      sheet: state.sheet,
+      row: state.selection.row,
+      col: state.selection.col,
+      top: els.body.scrollTop,
+      left: els.body.scrollLeft,
+      widths: widthsPayload(),
+    },
   }).catch(() => {});
 }
 
@@ -1315,6 +1785,9 @@ function select(row, col, { scrollIntoView = false } = {}) {
   state.selection.row = targetRow;
   state.selection.col = targetCol;
   updateReadout();
+  // An open panel follows the selection, so the chain on screen is always the
+  // chain around the cell the readout names.
+  refreshDependencies();
 
   if (scrollIntoView) {
     const body = els.body;
@@ -1373,13 +1846,145 @@ function scrollFromPane(event) {
 /** The formula the readout shows, or nothing for a cell that is not calculated. */
 function showReadoutFormula(formula) {
   els.readoutFormula.textContent = formula;
-  els.readoutFormula.title = formula ? `Formula: ${formula}` : "";
+  els.readoutFormula.title = formula
+    ? `Formula: ${formula} — Ctrl+Shift+C copies it`
+    : "";
   els.readoutFormula.hidden = !formula;
+  // Following the chain is only offered where there is a recipe to start from.
+  els.btnTrace.hidden = !formula;
+}
+
+// ---------------------------------------------------------------------------
+// Dependencies
+// ---------------------------------------------------------------------------
+
+/**
+ * The chain around the selected cell.
+ *
+ * A report is a chain of calculations, and a figure that looks wrong gives no
+ * hint of where to look next. The panel names the cells the selected formula
+ * reads and the cells that read it, each with its text; every name is a button,
+ * so the chain can be walked from either end while the place it started from
+ * stays one keypress away.
+ */
+let depsRequest = 0;
+
+function closeDependencies() {
+  // An answer still on its way belongs to the panel being closed.
+  depsRequest += 1;
+  els.deps.hidden = true;
+}
+
+async function openDependencies() {
+  els.deps.hidden = false;
+  refreshDependencies();
+}
+
+/**
+ * Ask for the chain around the selection, and draw it when it arrives.
+ *
+ * The answer belongs to the cell that was selected when it was asked for; a
+ * later selection makes an earlier answer stale, so the panel never shows the
+ * chain of a cell the reader has already left.
+ */
+async function refreshDependencies() {
+  if (els.deps.hidden || !state.info || state.busy) return;
+  const { row, col } = state.selection;
+  const request = ++depsRequest;
+  try {
+    const data = await invoke("cell_dependencies", {
+      sheet: state.sheet,
+      row,
+      col,
+    });
+    if (request !== depsRequest) return;
+    renderDependencies(row, col, data);
+  } catch (err) {
+    if (request !== depsRequest) return;
+    els.depsTitle.textContent = `${columnName(col)}${row + 1}`;
+    els.depsSub.textContent = "";
+    els.depsBody.innerHTML = `<p class="deps-empty">${esc(String(err))}</p>`;
+  }
+}
+
+/**
+ * The formula the panel's heading repeats, once the cell in front has loaded.
+ *
+ * A chain can be drawn before the tile holding its cell has arrived, so this is
+ * also called as tiles land: the heading says what the cell is calculated from
+ * as soon as the grid itself knows.
+ */
+function updateDepsSub(row, col) {
+  const cell = cellAt(row, col);
+  const formula = cell && cell[4] ? formulaText(cell[4]) : "";
+  els.depsSub.textContent = formula;
+  return formula;
+}
+
+function renderDependencies(row, col, data) {
+  const cell = cellAt(row, col);
+  const formula = updateDepsSub(row, col);
+  els.depsTitle.textContent = `${columnName(col)}${row + 1}`;
+
+  const section = (heading, cells, empty) => {
+    const count = cells.length
+      ? ` <span class="deps-count">${cells.length}</span>`
+      : "";
+    const list = cells.length
+      ? `<ul class="deps-list">${cells
+          .map(
+            (item) =>
+              `<li><button type="button" class="deps-cell${
+                item.formula ? " is-calc" : ""
+              }" data-row="${item.row}" data-col="${item.col}" title="${
+                item.formula
+                  ? "Calculated here — press to follow it"
+                  : "Press to select this cell"
+              }"><span class="deps-ref">${columnName(item.col)}${
+                item.row + 1
+              }</span><span class="deps-text">${esc(
+                item.text || "·"
+              )}</span></button></li>`
+          )
+          .join("")}</ul>`
+      : `<p class="deps-empty">${esc(empty)}</p>`;
+    return `<section class="deps-section"><h3>${heading}${count}</h3>${list}</section>`;
+  };
+
+  const parts = [
+    section(
+      "Feeds this cell",
+      data.precedents,
+      // A cell that has not arrived yet cannot say which of the two it is.
+      cell === undefined
+        ? "Nothing feeds it."
+        : formula
+        ? "Its formula names no cells on this sheet."
+        : "Nothing feeds it: it is typed in, not calculated."
+    ),
+    section("Reads this cell", data.dependents, "Nothing is calculated from it."),
+  ];
+  if (data.unlisted && data.unlisted.length) {
+    parts.push(
+      `<p class="deps-note">It also reads ${data.unlisted
+        .map((name) => `<code>${esc(name)}</code>`)
+        .join(", ")}, a whole column or row: each one covers too many cells to list here.</p>`
+    );
+  }
+  if (data.truncated) {
+    parts.push(
+      `<p class="deps-note">The list stops before the end: there are more cells than it lists.</p>`
+    );
+  }
+  els.depsBody.innerHTML = parts.join("");
 }
 
 function updateReadout() {
   const { row, col } = state.selection;
   els.readoutRef.textContent = `${columnName(col)}${row + 1}`;
+  // The panel's heading carries the same formula, and the cell may have
+  // arrived after the chain around it was drawn.
+  if (!els.deps.hidden) updateDepsSub(row, col);
   els.readoutValue.classList.remove("is-hidden-value");
   els.readoutValue.title = "";
   const cell = cellAt(row, col);
@@ -1409,14 +2014,31 @@ function updateReadout() {
   }
 }
 
-function copySelection() {
+/**
+ * Copy the selected cell.
+ *
+ * `formula` asks for the recipe rather than the result: the same text the
+ * readout shows, with its leading `=`, so it can be pasted into a formula bar
+ * or another sheet instead of arriving as the number it produced. The formula
+ * is copied exactly as the file writes it — a reference is not shifted the way
+ * a spreadsheet would shift it for the destination.
+ */
+function copySelection({ formula = false } = {}) {
   const { row, col } = state.selection;
+  const ref = `${columnName(col)}${row + 1}`;
   const cell = cellAt(row, col);
   if (!cell) return;
   // A hidden value is what copying the cell gives in Excel too, and the
   // readout has already shown it: copying the blank would lose the number.
-  const text = cell[3] || cell[1];
-  const done = () => flash(`Copied ${columnName(col)}${row + 1}`);
+  const text = formula ? formulaText(cell[4]) : cell[3] || cell[1];
+  // A cell that holds no formula has no recipe to give; saying so is better
+  // than a copy that looks like it failed.
+  if (formula && !text) {
+    flash(`${ref} is not calculated, so it has no formula to copy.`, true);
+    return;
+  }
+  const done = () =>
+    flash(formula ? `Copied the formula in ${ref}` : `Copied ${ref}`);
 
   if (navigator.clipboard && navigator.clipboard.writeText) {
     navigator.clipboard.writeText(text).then(done).catch(() => legacyCopy(text, done));
@@ -1509,6 +2131,9 @@ async function openPath(path, dialect = { delimiter: "", encoding: "" }, { expli
   // A move that has not been written yet still belongs to the file that is
   // open now, not to the one about to replace it.
   flushViewSave();
+  // The panel and the menu are about the file being replaced.
+  closeDependencies();
+  closeViewMenu();
   setBusy(true, "Reading…");
   // Captured before the await: a second open of the same file must not read
   // the state the first one is about to replace.
@@ -1537,6 +2162,9 @@ async function openPath(path, dialect = { delimiter: "", encoding: "" }, { expli
     // A file reopens on the sheet it was left on, when the workbook still has
     // that sheet: a tab removed since would otherwise reopen nothing.
     const viewed = info.view || null;
+    // The columns it was left with, by sheet — drags this reader made earlier,
+    // laid over the widths the file itself carries.
+    state.widths = widthsFromView(viewed);
     state.sheet =
       viewed &&
       Number.isInteger(viewed.sheet) &&
@@ -1544,10 +2172,12 @@ async function openPath(path, dialect = { delimiter: "", encoding: "" }, { expli
       viewed.sheet < info.sheets.length
         ? viewed.sheet
         : 0;
-    // Another file, another set of hidden rows and its own order: the view
-    // starts collapsed and unsorted.
+    // Another file, another set of hidden rows: the view starts collapsed. The
+    // order a delimited file's records were left in comes back with the file —
+    // the Rust side has already put the rows that way, so this is the strip and
+    // the status bar catching up with the table, not a second sort.
     state.showHidden = false;
-    state.sort = null;
+    state.sort = sortFromText(info.text);
     resetTiles();
     state.selection.row = 0;
     state.selection.col = 0;
@@ -1615,9 +2245,14 @@ async function chooseFile() {
 function closeWorkbook() {
   // A position still waiting to be written belongs to the file being closed.
   flushViewSave();
+  closeDependencies();
+  closeViewMenu();
   state.info = null;
   state.text = { delimiter: "", encoding: "" };
   state.headerRow = null;
+  // The widths belonged to the file that is being closed; the next open brings
+  // its own from the store.
+  state.widths = {};
   els.frozenViewport.hidden = true;
   els.frozenCorner.hidden = true;
   els.frozen.innerHTML = "";
@@ -1688,6 +2323,10 @@ function setSheet(index) {
   // in the file's own order.
   state.showHidden = false;
   state.sort = null;
+  // Cells are addressed per sheet; a chain from the sheet behind would be
+  // naming the wrong cells, and the menu's notes describe the sheet in front.
+  closeDependencies();
+  closeViewMenu();
   resetTiles();
   state.selection.row = 0;
   state.selection.col = 0;
@@ -1708,6 +2347,7 @@ function setSheet(index) {
 function updateStatus() {
   updateTrustBadge();
   updateStatusNote();
+  updateFileOrderButton();
   const info = state.info;
   if (!info) {
     els.statusFile.textContent = "No file open";
@@ -1729,9 +2369,8 @@ function updateStatus() {
     bits.push(`data starts at row ${(sheet.firstUsedRow + 1).toLocaleString()}`);
   }
   if (state.sort && isTextTable()) {
-    bits.push(
-      `sorted by ${state.sort.label}, ${state.sort.descending ? "descending" : "ascending"}`
-    );
+    const label = state.sort.label || columnLabel(state.sort.col);
+    bits.push(`sorted by ${label}, ${state.sort.descending ? "descending" : "ascending"}`);
   }
   els.statusCells.textContent = bits.join("  ·  ");
 }
@@ -1780,6 +2419,8 @@ function updateTextBar() {
     els.textHeader.value = "";
     els.textHeader.disabled = true;
     els.btnSaveUtf8.hidden = true;
+    els.btnFileOrder.hidden = true;
+    els.btnFileOrder.disabled = true;
     els.btnSaveUtf8.disabled = true;
     return;
   }
@@ -2420,6 +3061,54 @@ function initEvents() {
     openPath(button.dataset.path);
   });
   els.btnExport.addEventListener("click", exportOds);
+
+  // The view menu: a click toggles it, a click anywhere else dismisses it, and
+  // the arrow keys walk it once it is open.
+  els.btnView.addEventListener("click", toggleViewMenu);
+  els.btnView.addEventListener("keydown", (event) => {
+    if (event.key === "ArrowDown" && els.viewMenu.hidden) {
+      event.preventDefault();
+      openViewMenu();
+    }
+  });
+  els.viewMenu.addEventListener("keydown", (event) => {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      stepViewMenu(1);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      stepViewMenu(-1);
+    } else if (event.key === "Home" || event.key === "End") {
+      event.preventDefault();
+      const items = viewMenuItems().filter((item) => !item.disabled);
+      const target = event.key === "Home" ? items[0] : items[items.length - 1];
+      if (target) target.focus();
+    }
+  });
+  document.addEventListener("click", (event) => {
+    if (els.viewMenu.hidden) return;
+    if (event.target instanceof Element && event.target.closest(".menu-anchor")) return;
+    closeViewMenu();
+  });
+  els.menuHidden.addEventListener("click", () => {
+    closeViewMenu();
+    setShowHidden(!state.showHidden);
+  });
+  els.menuData.addEventListener("click", jumpToData);
+  els.menuScroll.addEventListener("click", jumpToScrollingCell);
+
+  // The readout's chain button opens the panel; while it is open, pressing it
+  // again re-reads the chain around the cell in front.
+  els.btnTrace.addEventListener("click", () => {
+    if (els.deps.hidden) openDependencies();
+    else refreshDependencies();
+  });
+  els.btnDepsClose.addEventListener("click", closeDependencies);
+  els.depsBody.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-row]");
+    if (!button || state.busy) return;
+    select(Number(button.dataset.row), Number(button.dataset.col), true);
+  });
   // Reload keeps the text dialect: re-reading the file should not silently
   // undo the delimiter and encoding the user picked for it.
   els.btnReload.addEventListener("click", () => {
@@ -2478,6 +3167,7 @@ function initEvents() {
   els.textEncoding.addEventListener("change", applyTextDialect);
   els.textHeader.addEventListener("change", applyHeaderInput);
   els.btnSaveUtf8.addEventListener("click", saveUtf8Copy);
+  els.btnFileOrder.addEventListener("click", restoreFileOrder);
   // Any row number can be the header: pointing at the row is how a table with
   // a title above its column names is fixed. Clicking the pin again releases it.
   // A seam stands where a hidden run was collapsed away: clicking it shows the
@@ -2502,6 +3192,13 @@ function initEvents() {
     setHeaderRow(row === state.headerRow ? null : row);
   });
   els.cols.addEventListener("click", (event) => {
+    // The press that ended a drag is not a press on the head, and a press on a
+    // column's edge is about its width rather than its order.
+    if (swallowHeadClick) {
+      swallowHeadClick = false;
+      return;
+    }
+    if (event.target.closest("[data-grip]")) return;
     const seam = event.target.closest("[data-seam]");
     if (seam) {
       revealSeam(seam, "col");
@@ -2510,6 +3207,12 @@ function initEvents() {
     const head = event.target.closest("[data-sort]");
     if (head) sortByColumn(Number(head.dataset.sort));
   });
+  // A column's width is dragged from the right edge of its head. The frozen
+  // columns keep their own head strip, and it drags the same way.
+  for (const strip of [els.cols, els.freezeColsHead]) {
+    strip.addEventListener("pointerdown", startColumnResize);
+    strip.addEventListener("dblclick", resetColumnWidth);
+  }
   els.btnHidden.addEventListener("click", () => setShowHidden(!state.showHidden));
 
   els.body.addEventListener(
@@ -2566,9 +3269,13 @@ function onKeyDown(event) {
   // move the selection, and Ctrl+C in one must copy its text.
   const field = event.target instanceof HTMLElement && event.target.closest("input, select, textarea");
   if (event.key === "Escape") {
+    // The menu hands the focus back to its button only when it had it: Escape
+    // pressed while reading the grid should not pull the focus off it.
+    closeViewMenu({ focusButton: els.viewMenu.contains(document.activeElement) });
     closeUpdateConfirm();
     closeSettings();
     closeTrust();
+    closeDependencies();
     // Escape leaves a field without committing it: the header goes back to the
     // row that is actually pinned, and the blur that follows has nothing to
     // change.
@@ -2587,6 +3294,25 @@ function onKeyDown(event) {
   if (event.ctrlKey && event.key.toLowerCase() === "o") {
     event.preventDefault();
     chooseFile();
+    return;
+  }
+  // Ctrl+Shift+C gives what the cell is calculated from rather than what it
+  // shows, which is what a formula bar wants pasted into it.
+  if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "c") {
+    event.preventDefault();
+    copySelection({ formula: true });
+    return;
+  }
+  // The two jumps the view menu offers, reachable without opening it: where the
+  // data begins, and where the part of the sheet that scrolls begins.
+  if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "j") {
+    event.preventDefault();
+    jumpToData();
+    return;
+  }
+  if (event.ctrlKey && event.shiftKey && event.key === "Home") {
+    event.preventDefault();
+    jumpToScrollingCell();
     return;
   }
   if (event.ctrlKey && event.key.toLowerCase() === "c") {

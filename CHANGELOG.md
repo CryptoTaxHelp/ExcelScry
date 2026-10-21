@@ -9,6 +9,102 @@ those entries into a version section and tags the commit that holds it.
 
 ## [Unreleased]
 
+### Added
+
+- **The grid's view switches are in a View menu.** Showing the rows and
+  columns a sheet hides was a toolbar button that existed only for the files
+  that hide something, and the two places a reader most wants to get to — where
+  the data begins on a report that starts at `C6`, and where the part of the
+  sheet that scrolls begins under a frozen header — had no way to be reached
+  except by scrolling. **View** now opens a menu holding all three: the hidden
+  rows and columns with their count and a tick when they are being shown,
+  **Jump to data** (`Ctrl+Shift+J`), and **First scrolling cell**
+  (`Ctrl+Shift+Home`). Both jumps put the cell at the top-left of the view
+  rather than merely somewhere on screen: a jump that scrolled a cell into the
+  bottom edge of the pane would leave the reader looking at everything except
+  the place they asked for. The second jump is what makes the first one's
+  freeze handling legible — it skips exactly the frozen rows and columns, or the
+  pinned header of a delimited file, and starts the view at the first cell that
+  actually scrolls, so a jump never lands behind the band it cleared. Jump to
+  data reads the corner of the data from the file's first used row and column,
+  and on a delimited file it goes to the first record under the pinned names
+  rather than to the names themselves, which are not data. An action that cannot
+  be taken says why instead of disappearing: a sheet that hides nothing shows
+  `none`, one that freezes nothing explains that the whole grid scrolls. The
+  menu is usable from the keyboard — it opens onto its first action, the arrow
+  keys walk it, `Esc` closes it and hands the focus back — and the toolbar keeps
+  its one-click hidden-rows button beside it, since that is the switch most
+  often wanted. Nothing is written back: revealing a hidden row here is a view,
+  not an edit.
+
+- **A calculated cell's formula can be copied instead of its value.**
+  `Ctrl+C` has always copied what the cell shows, which is what a report's
+  figures are usually wanted for — but rebuilding a calculation elsewhere meant
+  retyping it from the readout, character by character, and hoping the
+  references were the ones intended. `Ctrl+Shift+C` now puts the formula on the
+  clipboard instead: `=E7*F7`, in the one-`=` form the readout shows whatever
+  syntax the file writes it in, so it pastes into a formula bar or another
+  sheet and is read as a calculation rather than as text. The references are
+  copied exactly as written — nothing is shifted for the destination, because
+  this app never writes to a workbook, so the cell a formula names stays the
+  cell it names. A cell that is not calculated has no formula to give, and the
+  status bar says so instead of quietly copying the value a second time.
+
+- **A calculated figure can be traced in both directions.** A formula readout
+  says what one cell is made of, which is no help when the figure that looks
+  wrong is the one three steps down: the cells it reads are cells somebody else
+  calculated, and the review goes back through them one click at a time. Every
+  calculated cell now offers **Trace** beside its formula, and the panel it
+  opens names the cells that formula reads and the cells that read it, each with
+  its own displayed text — the units and the price behind a revenue figure, and
+  the total that sums it. Each reference is a button, so the chain is walked in
+  either direction, and the panel follows the selection while it is open: select
+  a precedent and the same panel now reports what that cell feeds, which is how
+  an input is followed forward into the numbers it moves. A reference to a whole
+  column or row (`E:E`) is named in a note rather than expanded into thousands
+  of rows, a range longer than two hundred cells stops with a note saying so,
+  and only the sheet in front is followed — a reference to another sheet is not
+  a step the panel can take. Pressing Trace again re-reads the chain, and
+  `Esc` or the × closes the panel. The workbook is never written, and
+  a delimited file has no formulas to trace.
+
+- **Column widths can be dragged, and the file reopens with them.** A report's
+  own columns are sometimes too narrow for the notes in them and too wide for
+  the dates, and the only way to change that was to export the file and edit it
+  elsewhere. Every column's right edge in the letter strip is now a grip:
+  dragging it widens or narrows that column, with the sheet laid out around it
+  as the pointer moves, and the strip shows the new edge under the pointer. The
+  width is remembered per sheet, per file, beside the sheet, cell and scroll
+  offset the file already reopened at, so a table comes back the shape it was
+  read in; each tab keeps its own widths rather than lending one sheet's shape
+  to another, and double-clicking an edge puts that column back to the width the
+  file gives it. A drag is drawn as it happens and written a moment after it
+  stops, like the position, and a drag back to where it started remembers
+  nothing at all. The workbook is never written: the widths are how the file is
+  read, and the export still carries the sheet's own widths and row heights.
+  A missing or unreadable store simply means the file opens at its own widths.
+
+- **A delimited file reopens in the order its records were last left in.**
+  Sorting a CSV by `Units` or by `Ordered` is work done to read it, and coming
+  back to the same export the next morning to find it in export order meant
+  doing that work again. The column, the direction and the column's name are
+  now remembered for the file, beside the delimiter and the header row it was
+  read with, and the rows are put back in that order while the file is read —
+  the grid's first paint is the sorted table, not a re-sort once the cells
+  arrive, and the arrow in the strip and the status bar say which order it is.
+  Changing the delimiter or encoding keeps the order, since that changes how
+  the file is read rather than what is in it; an edited file, or a different
+  export put at the same path, starts in its own order, and so does a file
+  whose sorted column is no longer there.
+
+  The way back is in the bar: **File order** moves the records into the order
+  the file has them without reading it again, so the scroll, the selection and
+  the tiles already on screen stay where they are, and the chosen order stops
+  being remembered. It goes back to where the rows started rather than undoing
+  one sort, so two presses, or a sort that was put back on reopening, all lead
+  to the same file order. A workbook is not affected: its rows are a layout,
+  not a list of records, and it still has no sort control.
+
 ## [0.5.0] - 2026-10-20
 
 ### Added

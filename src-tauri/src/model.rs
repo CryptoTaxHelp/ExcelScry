@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use crate::number_format::NumberFormat;
+use crate::text_prefs::SortChoice;
 use crate::trust::TrustReport;
 use crate::view_prefs::ViewState;
 
@@ -331,6 +332,13 @@ pub struct SheetData {
     pub layout: SheetLayout,
     /// What each calculated cell was computed from, when the file says.
     pub formulas: SheetFormulas,
+    /// Where each row sits in the file, once the records have been ordered.
+    ///
+    /// `None` while the rows are in the file's own order — always true of a
+    /// workbook, and of a delimited file until someone sorts it. A sorted table
+    /// keeps one position per row, so the file's order can be put back without
+    /// reading the file again; it is a number per row, not a copy of the rows.
+    pub original_order: Option<Vec<usize>>,
 }
 
 impl SheetData {
@@ -345,11 +353,36 @@ impl SheetData {
             .unwrap_or(&Cell::Empty)
     }
 
+    /// The text the grid shows for a cell: its value through the sheet's own
+    /// number format, or the plain value when no format renders it.
+    pub fn text_at(&self, row: usize, col: usize) -> String {
+        let cell = self.cell(row, col);
+        if cell.is_empty() {
+            return String::new();
+        }
+        self.formats
+            .get(row, col)
+            .and_then(|format| format.render(cell))
+            .unwrap_or_else(|| cell.display())
+    }
+
     /// First row containing at least one non-empty cell.
     pub fn first_used_row(&self) -> Option<usize> {
         self.rows
             .iter()
             .position(|r| r.iter().any(|c| !c.is_empty()))
+    }
+
+    /// First column containing at least one non-empty cell.
+    ///
+    /// With [`first_used_row`](Self::first_used_row) this is the corner of the
+    /// data, which is not A1 on a report that leaves its first rows and columns
+    /// empty for a title: it is the cell a jump to the data should land on.
+    pub fn first_used_col(&self) -> Option<usize> {
+        self.rows
+            .iter()
+            .filter_map(|row| row.iter().position(|cell| !cell.is_empty()))
+            .min()
     }
 
     /// Sort the records of a delimited table by one column, from `first` on.
@@ -366,19 +399,61 @@ impl SheetData {
         if first >= self.rows.len() || column >= self.cols {
             return;
         }
-        let mut keyed: Vec<(String, bool, Vec<Cell>)> = self
+        // Each row's place in the file, so the file's own order can be put back
+        // without reading it again. A second sort composes with the first: what
+        // is remembered is where the rows started, not the last order asked for.
+        let mut order = self
+            .original_order
+            .take()
+            .unwrap_or_else(|| (0..self.rows.len()).collect());
+        let sources = order.split_off(first);
+        let mut keyed: Vec<(String, bool, Vec<Cell>, usize)> = self
             .rows
             .split_off(first)
             .into_iter()
-            .map(|row| {
+            .zip(sources)
+            .map(|(row, source)| {
                 let key = row.get(column).map(Cell::display).unwrap_or_default();
                 let blank = key.trim().is_empty();
-                (key, blank, row)
+                (key, blank, row, source)
             })
             .collect();
         keyed.sort_by(|a, b| order_fields(&a.0, a.1, &b.0, b.1, descending));
-        self.rows.extend(keyed.into_iter().map(|(_, _, row)| row));
+        let mut sorted = Vec::with_capacity(keyed.len());
+        self.rows
+            .extend(keyed.into_iter().map(|(_, _, row, source)| {
+                sorted.push(source);
+                row
+            }));
+        order.extend(sorted);
+        // A sort that leaves every row where it was is the file's own order
+        // still: there is nothing for the reader to go back to.
+        self.original_order = (!is_identity(&order)).then_some(order);
     }
+
+    /// Put the rows back in the order the file has them.
+    ///
+    /// Returns whether anything moved: a table nobody sorted is already in the
+    /// file's order, and asking for it is not a change. Nothing is read again —
+    /// the rows are moved in memory, back to the places they came from.
+    pub fn restore_file_order(&mut self) -> bool {
+        let Some(order) = self.original_order.take() else {
+            return false;
+        };
+        let mut placed: Vec<(usize, Vec<Cell>)> =
+            order.into_iter().zip(self.rows.drain(..)).collect();
+        placed.sort_by_key(|(source, _)| *source);
+        self.rows = placed.into_iter().map(|(_, row)| row).collect();
+        true
+    }
+}
+
+/// Whether a permutation leaves every row where it was.
+fn is_identity(order: &[usize]) -> bool {
+    order
+        .iter()
+        .enumerate()
+        .all(|(index, source)| index == *source)
 }
 
 /// Order two fields of a delimited table, with blanks last either way.
@@ -463,6 +538,11 @@ pub struct TextInfo {
     /// should not come back with a header; a number for a row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub header_row: Option<Option<usize>>,
+    /// The order the records were left in, when one was chosen: the column, the
+    /// direction and the column's name. The rows are already in it by the time
+    /// the grid is told, so this is what the strip and the status bar read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort: Option<SortChoice>,
 }
 
 /// A parsed workbook held in application state.
@@ -536,6 +616,9 @@ pub struct SheetInfo {
     /// Absolute row index of the first non-empty row, so the UI can offer
     /// "jump to data" on sheets that start far from A1.
     pub first_used_row: Option<usize>,
+    /// Absolute column index of the first non-empty column, for the same jump:
+    /// the two together are the corner of the data.
+    pub first_used_col: Option<usize>,
     /// `[column, width in pixels]` for the columns the sheet sizes itself.
     pub col_widths: Vec<(usize, f64)>,
     /// `[row, height in pixels]` for the rows the sheet sizes itself.
@@ -619,6 +702,7 @@ impl LoadedWorkbook {
                         .map(|r| r.iter().filter(|c| !c.is_empty()).count())
                         .sum(),
                     first_used_row: s.first_used_row(),
+                    first_used_col: s.first_used_col(),
                     col_widths: s
                         .layout
                         .col_widths
@@ -763,6 +847,7 @@ mod tests {
             encoding_chosen: false,
             undecodable: false,
             header_row,
+            sort: None,
         }
     }
 
@@ -781,6 +866,40 @@ mod tests {
 
         let json = serde_json::to_value(text_info(Some(Some(2)))).unwrap();
         assert_eq!(json["headerRow"], 2);
+    }
+
+    fn sheet_of(rows: Vec<Vec<Cell>>) -> SheetData {
+        let cols = rows.iter().map(Vec::len).max().unwrap_or(0);
+        SheetData {
+            name: "Report".to_string(),
+            rows,
+            cols,
+            formats: Default::default(),
+            looks: Default::default(),
+            layout: Default::default(),
+            formulas: Default::default(),
+            original_order: None,
+        }
+    }
+
+    #[test]
+    fn the_corner_of_the_data_is_the_first_used_row_and_column() {
+        // A report with a blank first row and two blank columns: the data
+        // starts at C2, which is where a jump to data should land.
+        let sheet = sheet_of(vec![
+            vec![],
+            vec![Cell::Empty, Cell::Empty, Cell::Text("Region".to_string())],
+            vec![Cell::Empty, Cell::Empty, Cell::Text("North".to_string())],
+        ]);
+        assert_eq!(sheet.first_used_row(), Some(1));
+        assert_eq!(sheet.first_used_col(), Some(2));
+    }
+
+    #[test]
+    fn a_sheet_with_nothing_in_it_has_no_corner_to_jump_to() {
+        let sheet = sheet_of(vec![vec![], vec![Cell::Empty]]);
+        assert_eq!(sheet.first_used_row(), None);
+        assert_eq!(sheet.first_used_col(), None);
     }
 
     #[test]
@@ -866,6 +985,7 @@ mod tests {
             format: "Excel Workbook (xlsx)".into(),
             file_size: 0,
             sheets: vec![SheetData {
+                original_order: None,
                 name: "Sized".into(),
                 rows: vec![vec![Cell::Text("a".into())]],
                 cols: 1,
@@ -931,6 +1051,7 @@ mod tests {
             format: "Excel Workbook (xlsx)".into(),
             file_size: 0,
             sheets: vec![SheetData {
+                original_order: None,
                 name: "Styled".into(),
                 rows: vec![
                     vec![Cell::Text("Region".into()), Cell::Text("Qty".into())],
@@ -998,6 +1119,7 @@ mod tests {
             format: "Excel Workbook (xlsx)".into(),
             file_size: 0,
             sheets: vec![SheetData {
+                original_order: None,
                 name: "Hidden".into(),
                 rows: vec![vec![
                     Cell::Float(0.0),
@@ -1058,6 +1180,7 @@ mod tests {
             format: "Delimited text (csv)".into(),
             file_size: 0,
             sheets: vec![SheetData {
+                original_order: None,
                 name: "table".into(),
                 rows,
                 cols,
@@ -1077,6 +1200,7 @@ mod tests {
                 encoding_chosen: false,
                 undecodable: false,
                 header_row: Some(Some(0)),
+                sort: None,
             }),
         }
     }
@@ -1178,6 +1302,68 @@ mod tests {
     }
 
     #[test]
+    fn a_sorted_table_can_go_back_to_the_order_its_file_has() {
+        let mut book = text_workbook(&[
+            &["Quarterly export"],
+            &["Region", "Units"],
+            &["South", "3"],
+            &["North", "7"],
+            &["East", "5"],
+        ]);
+
+        // Nothing was sorted, so there is no order to go back to and nothing
+        // moves.
+        assert!(!book.sheets[0].restore_file_order());
+
+        book.sort_text(0, Some(1), 1, false).expect("sort");
+        let sorted: Vec<String> = (2..5).map(|row| field(&book, row, 0)).collect();
+        assert_eq!(sorted, ["South", "East", "North"], "3, 5, 7");
+
+        assert!(book.sheets[0].restore_file_order());
+        let back: Vec<String> = (2..5).map(|row| field(&book, row, 0)).collect();
+        assert_eq!(back, ["South", "North", "East"], "the file's own order");
+        assert_eq!(field(&book, 0, 0), "Quarterly export");
+        assert_eq!(field(&book, 1, 0), "Region", "the header stays the header");
+        assert!(
+            book.sheets[0].original_order.is_none(),
+            "nothing is left to go back to"
+        );
+    }
+
+    #[test]
+    fn a_second_sort_still_goes_back_to_the_file_order() {
+        let mut book = text_workbook(&[
+            &["Name", "Units"],
+            &["Beta", "10"],
+            &["alpha", "9"],
+            &["Gamma", "2"],
+        ]);
+        let file_order: Vec<String> = (1..4).map(|row| field(&book, row, 0)).collect();
+
+        book.sort_text(0, Some(0), 1, false).expect("ascending");
+        book.sort_text(0, Some(0), 0, true).expect("by name");
+        let sorted: Vec<String> = (1..4).map(|row| field(&book, row, 0)).collect();
+        assert_ne!(sorted, file_order, "the second sort moved the records");
+
+        // What is remembered is where the rows started, not the last order
+        // asked for, so one press is enough however many sorts came before it.
+        book.sheets[0].restore_file_order();
+        let back: Vec<String> = (1..4).map(|row| field(&book, row, 0)).collect();
+        assert_eq!(back, file_order);
+    }
+
+    #[test]
+    fn a_sort_that_leaves_the_rows_where_they_were_keeps_no_order() {
+        let mut book = text_workbook(&[&["Name"], &["Beta"], &["alpha"]]);
+
+        // `Beta` then `alpha` is the file's order and the descending order, so
+        // there is nothing for the reader to go back to.
+        book.sort_text(0, Some(0), 0, true).expect("descending");
+        assert!(book.sheets[0].original_order.is_none());
+        assert!(!book.sheets[0].restore_file_order());
+    }
+
+    #[test]
     fn a_page_carries_the_formula_beside_its_value() {
         use crate::trust::{Trust, TrustReport};
 
@@ -1195,6 +1381,7 @@ mod tests {
             format: "Excel Workbook (xlsx)".into(),
             file_size: 0,
             sheets: vec![SheetData {
+                original_order: None,
                 name: "Calc".into(),
                 rows: vec![vec![Cell::Int(4), Cell::Int(8), Cell::Empty]],
                 cols: 3,

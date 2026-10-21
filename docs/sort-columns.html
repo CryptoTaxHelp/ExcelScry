@@ -11,7 +11,7 @@
 </style>
 <figure>
   <img src="sort-columns.png"
-       alt="ExcelScry showing an export whose title and note stay above the header row, with the records below ordered by Units, highest first, and a down arrow in that column's head">
+       alt="ExcelScry showing an export whose title and note stay above the header row, with the records below ordered by Units, highest first, a down arrow in that column's head, and a File order button in the delimited-text bar">
   <figcaption>
     The records are ordered by <code>Units</code>, highest first. Clicking that
     column's name in the strip sorted them by it; clicking it a second time
@@ -25,9 +25,16 @@
     <code>Units</code> puts 9 before 10 rather than after it; text compares
     without regard to case; and a blank field sorts last whichever direction is
     asked for, the way a spreadsheet does it. The status bar repeats the order
-    the table is in. Nothing is written back: the file on disk keeps the order
-    it arrived with, and a reload reads it that way. (Shown in the UI harness,
-    whose <code>#preamble</code> file carries a title and a note above its
-    column names, and whose records are what the sort moved.)
+    the table is in, and <strong>File order</strong> puts the records back the
+    way the file has them — the rows are moved in memory, so nothing is parsed
+    again, the scroll and the selection stay put, and the chosen order stops
+    being remembered. Nothing is written back: the file on disk keeps the order
+    it arrived with. The order is a choice kept for the file, though, beside
+    the delimiter and the header row it was read with — reopening the export
+    puts the records back in it, with the arrow and the status bar saying which
+    order that is, so the month-by-month read is there again the next morning
+    instead of having to be found again. (Shown in the UI harness, whose
+    <code>#preamble</code> file carries a title and a note above its column
+    names, and whose records are what the sort moved.)
   </figcaption>
 </figure>

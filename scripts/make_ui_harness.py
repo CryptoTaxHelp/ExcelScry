@@ -49,6 +49,14 @@ function salesCell(r, c) {
   // the grid marks it and the readout says what is behind the blank.
   if (r === 7 && c === 6) return ["f", "", null, "0"];
   if (r === 8 && c === 8) return ["s", "", null, "anything"];
+  // The total under the revenue column: a block of cells summed, so a table
+  // has a second step and the dependency view has a dependent to name.
+  if (r === 27) {
+    if (c === 2) return ["s", "Total", { bold: true, background: "#E2E8F0" }];
+    if (c === 6)
+      return ["f", "$848,975.30", { bold: true, background: "#E2E8F0" }, null, "SUM(G7:G26)"];
+    return null;
+  }
   if (r >= 6 && r <= 25) {
     const regions = ["North", "South", "East", "West"];
     switch (c) {
@@ -59,7 +67,7 @@ function salesCell(r, c) {
       case 6:
         // A calculated column: units times unit price, the shape a report's
         // own formula takes, so the grid can mark it and the readout show it.
-        return ["f", "$" + group((r * 137 * 19.99).toFixed(2)), null, null, `D${r + 1}*E${r + 1}`];
+        return ["f", "$" + group((r * 137 * 19.99).toFixed(2)), null, null, `E${r + 1}*F${r + 1}`];
       case 7: return ["d", `1${r % 10}/0${(r % 9) + 1}/2026`];
       case 8:
         return r === 9
@@ -147,11 +155,14 @@ function markupCell(r, c) {
 }
 
 const SHEETS = [
-  { name: "Sales report", rows: 200, cols: 11, firstUsed: 5, cell: salesCell },
-  { name: "Wide sheet", rows: 60, cols: 140, firstUsed: 0, cell: wideCell },
-  { name: "Tall sheet", rows: 50000, cols: 4, firstUsed: 0, cell: tallCell },
-  { name: "Unicode & escaping", rows: 12, cols: 3, firstUsed: 0, cell: markupCell },
-  { name: "Sized & merged", rows: 80, cols: 8, firstUsed: 0, cell: layoutCell },
+  // The sales report keeps its first two rows and its first two columns empty
+  // for a title and a margin, so its data corner is C6 rather than A1: that is
+  // what "jump to data" has to find.
+  { name: "Sales report", rows: 200, cols: 11, firstUsed: 5, firstUsedCol: 2, cell: salesCell },
+  { name: "Wide sheet", rows: 60, cols: 140, firstUsed: 0, firstUsedCol: 0, cell: wideCell },
+  { name: "Tall sheet", rows: 50000, cols: 4, firstUsed: 0, firstUsedCol: 0, cell: tallCell },
+  { name: "Unicode & escaping", rows: 12, cols: 3, firstUsed: 0, firstUsedCol: 0, cell: markupCell },
+  { name: "Sized & merged", rows: 80, cols: 8, firstUsed: 0, firstUsedCol: 0, cell: layoutCell },
 ];
 
 // What the backend reports for that sheet: two workbook defaults, four column
@@ -171,12 +182,16 @@ const LAYOUTS = {
   },
   "Wide sheet": {
     // The header row and the index column are frozen: scrolling right keeps
-    // the row labels, scrolling down keeps the column names.
+    // the row labels, scrolling down keeps the column names. It also hides one
+    // row and one column, so the view menu has all three of its switches live
+    // on the same sheet.
     defaultColWidth: null,
     defaultRowHeight: null,
     colWidths: [],
     rowHeights: [],
     merges: [],
+    hiddenColRuns: [[3, 3]],
+    hiddenRowRuns: [[2, 2]],
     frozenCols: 1,
     frozenRows: 1,
   },
@@ -205,6 +220,98 @@ const LAYOUTS = {
 
 // What `get_rows` serves: the sheets of the workbook that was opened last.
 let OPENED = SHEETS;
+
+// ---- The chain around a cell ---------------------------------------------
+
+// `cell_dependencies` reads the same formula text the grid shows, so a
+// reference names the cell the strip names: `E7*F7` feeds G7 with the units and
+// the unit price it multiplies.
+function colIndex(letters) {
+  let index = 0;
+  for (const letter of letters) index = index * 26 + (letter.charCodeAt(0) - 64);
+  return index - 1;
+}
+
+// Every reference a formula makes: one cell, or a rectangle named `C7:C9`.
+// Function names carry no digits, so they are never mistaken for references.
+function referencesOf(formula) {
+  const found = [];
+  const cell = /\$?([A-Z]{1,3})\$?([0-9]+)(?::\$?([A-Z]{1,3})\$?([0-9]+))?/g;
+  for (const hit of formula.matchAll(cell)) {
+    const top = Number(hit[2]) - 1;
+    const bottom = hit[4] ? Number(hit[4]) - 1 : top;
+    const left = colIndex(hit[1]);
+    const right = hit[3] ? colIndex(hit[3]) : left;
+    found.push({
+      top: Math.min(top, bottom),
+      bottom: Math.max(top, bottom),
+      left: Math.min(left, right),
+      right: Math.max(left, right),
+    });
+  }
+  return found;
+}
+
+function formulaOf(sheet, row, col) {
+  const cell = sheet.cell(row, col);
+  return cell && cell[4] ? "=" + cell[4] : "";
+}
+
+function describeCell(sheet, row, col) {
+  const cell = sheet.cell(row, col);
+  return {
+    row,
+    col,
+    text: cell ? cell[1] : "",
+    formula: Boolean(cell && cell[4]),
+  };
+}
+
+// What feeds a cell and what it feeds. The mock's formulas live in the Revenue
+// column, so the reverse walk is over the cells themselves rather than over a
+// sparse table of formulas the way the Rust side can.
+function depsOf(sheetIndex, row, col) {
+  const sheet = OPENED[sheetIndex];
+  const seen = new Map();
+  let truncated = false;
+
+  for (const reference of referencesOf(formulaOf(sheet, row, col))) {
+    for (let r = reference.top; r <= reference.bottom && !truncated; r++) {
+      for (let c = reference.left; c <= reference.right && !truncated; c++) {
+        // A cell is not fed by itself, whatever its formula says.
+        if ((r === row && c === col) || seen.has(r + ":" + c)) continue;
+        if (seen.size >= 200) truncated = true;
+        else seen.set(r + ":" + c, describeCell(sheet, r, c));
+      }
+    }
+    if (truncated) break;
+  }
+
+  const dependents = [];
+  for (let r = 0; r < sheet.rows; r++) {
+    for (let c = 0; c < sheet.cols; c++) {
+      if (r === row && c === col) continue;
+      const formula = formulaOf(sheet, r, c);
+      if (!formula) continue;
+      const points = referencesOf(formula).some(
+        (reference) =>
+          row >= reference.top &&
+          row <= reference.bottom &&
+          col >= reference.left &&
+          col <= reference.right
+      );
+      if (points) dependents.push(describeCell(sheet, r, c));
+    }
+  }
+  dependents.sort((a, b) => a.row - b.row || a.col - b.col);
+
+  return {
+    precedents: [...seen.values()],
+    dependents: dependents.slice(0, 200),
+    unlisted: [],
+    truncated: truncated || dependents.length > 200,
+  };
+}
 
 // A delimited file for the text bar, at `#csv`. It is semicolon-separated with
 // decimal commas, so the comma a `.csv` starts with leaves it in one column -
@@ -405,10 +512,25 @@ function textWorkbook(path, delimiter, encoding) {
     // side moves its own: a record is a row, and its other fields travel with
     // it.
     data: rows,
+    // The file's own order, kept so `restore_text_order` can put the records
+    // back without re-reading the file — the mock's stand-in for the
+    // permutation `SheetData` keeps.
+    original: rows.slice(),
     cell: (r, c) =>
       sheet.data[r] && sheet.data[r][c] !== undefined ? ["s", sheet.data[r][c]] : null,
   };
   OPENED = [sheet];
+  // The order the file was left in. The Rust side applies it while reading, so
+  // the mock hands back sorted rows on the next open too, with the choice in
+  // the text info for the strip and the status bar.
+  const storedSort = mockStoredSort(path);
+  if (storedSort) {
+    const header = mockStoredHeader(path);
+    const first = header === undefined ? 1 : header === null ? 0 : header + 1;
+    if (first <= sheet.data.length) {
+      mockSortData(sheet, first, storedSort.column, storedSort.descending);
+    }
+  }
   return {
     path,
     fileName: String(path).split(/[\\/]/).pop(),
@@ -420,7 +542,14 @@ function textWorkbook(path, delimiter, encoding) {
     trust: TRUST_REPORTS.xlsx,
     view: VIEWS.get(path),
     sheets: [
-      { name: sheet.name, rows: sheet.rows, cols: sheet.cols, usedCells: 0, firstUsedRow: 0 },
+      {
+        name: sheet.name,
+        rows: sheet.rows,
+        cols: sheet.cols,
+        usedCells: 0,
+        firstUsedRow: 0,
+        firstUsedCol: 0,
+      },
     ],
     text: {
       delimiter: delimiter || "comma",
@@ -442,6 +571,7 @@ function textWorkbook(path, delimiter, encoding) {
       // chose one, null when it was left unpinned, a number for a row — the
       // three states the UI tells apart.
       ...(mockStoredHeader(path) === undefined ? {} : { headerRow: mockStoredHeader(path) }),
+      ...(storedSort ? { sort: storedSort } : {}),
     },
   };
 }
@@ -483,6 +613,28 @@ function mockStoredHeader(path) {
   return entry && "headerRow" in entry ? entry.headerRow : undefined;
 }
 
+/** The order remembered for a path, if the store has one. */
+function mockStoredSort(path) {
+  const entry = REMEMBERED.get(path);
+  return entry && entry.sort ? entry.sort : null;
+}
+
+/**
+ * Move a text sheet's records into an order, leaving the rows above the header
+ * where they are.
+ *
+ * Shared by the sort control and the read that puts a remembered order back, so
+ * the mock cannot show one order and reapply another.
+ */
+function mockSortData(sheet, first, column, descending) {
+  const records = sheet.data.slice(first).map((row) => {
+    const text = row[column] === undefined ? "" : String(row[column]);
+    return { row, key: text, blank: !text.trim() };
+  });
+  records.sort((a, b) => mockOrderRecords(a, b, Boolean(descending)));
+  sheet.data = sheet.data.slice(0, first).concat(records.map((record) => record.row));
+}
+
 /** Remember a header row, keeping the dialect stored beside it. */
 function mockRememberHeader(path, row) {
   if (!path) return;
@@ -513,6 +665,7 @@ function workbookInfo(path) {
       cols: s.cols,
       usedCells: 0,
       firstUsedRow: s.firstUsed,
+      firstUsedCol: s.firstUsedCol,
       colWidths: LAYOUTS[s.name] ? LAYOUTS[s.name].colWidths : [],
       rowHeights: LAYOUTS[s.name] ? LAYOUTS[s.name].rowHeights : [],
       defaultColWidth: LAYOUTS[s.name] ? LAYOUTS[s.name].defaultColWidth : null,
@@ -572,27 +725,47 @@ const HANDLERS = {
     mockRememberHeader(OPEN_PATH, row === undefined ? null : row);
     return null;
   },
-  // Mirrors `view_prefs::remember`: the position belongs to the file that is
-  // open, and the next open of that file is handed it back.
-  remember_view: ({ sheet, row, col, top, left }) => {
-    if (OPEN_PATH) VIEWS.set(OPEN_PATH, { sheet, row, col, top, left });
+  // Mirrors `view_prefs::remember`: the position and the column widths the
+  // reader dragged belong to the file that is open, and the next open of that
+  // file is handed both back.
+  remember_view: ({ view }) => {
+    if (OPEN_PATH) VIEWS.set(OPEN_PATH, view);
     return null;
   },
   // Mirrors `LoadedWorkbook::sort_text`: only a delimited file sorts, the
   // records below the pinned header move as whole rows, and the preamble above
-  // it is left alone.
-  sort_text_rows: ({ sheet, headerRow, column, descending }) => {
+  // it is left alone. Mirrors `text_prefs::remember_sort` too: the order is
+  // kept for the file, so reopening it comes back sorted.
+  sort_text_rows: ({ sheet, headerRow, column, descending, label }) => {
     const s = OPENED[sheet];
     if (!s || !s.data) throw new Error("Only a delimited text file can be sorted.");
     const first = headerRow === null || headerRow === undefined ? 0 : headerRow + 1;
     if (first > s.data.length) throw new Error("That header row is past the end of the file.");
-    const records = s.data.slice(first).map((row) => {
-      const text = row[column] === undefined ? "" : String(row[column]);
-      return { row, key: text, blank: !text.trim() };
-    });
-    records.sort((a, b) => mockOrderRecords(a, b, Boolean(descending)));
-    s.data = s.data.slice(0, first).concat(records.map((record) => record.row));
+    mockSortData(s, first, column, descending);
+    if (OPEN_PATH) {
+      REMEMBERED.set(OPEN_PATH, {
+        ...(REMEMBERED.get(OPEN_PATH) || {}),
+        sort: { column, descending: Boolean(descending), label: label || "" },
+      });
+    }
     return null;
+  },
+  // Mirrors `SheetData::restore_file_order`: the records go back where the file
+  // had them, and the chosen order is forgotten so the next open is the file's.
+  restore_text_order: ({ sheet }) => {
+    const s = OPENED[sheet];
+    if (!s || !s.original) throw new Error("Only a delimited text file has a file order.");
+    s.data = s.original.slice();
+    if (OPEN_PATH) {
+      const entry = { ...(REMEMBERED.get(OPEN_PATH) || {}) };
+      delete entry.sort;
+      if (entry.delimiter || entry.encoding || "headerRow" in entry) {
+        REMEMBERED.set(OPEN_PATH, entry);
+      } else {
+        REMEMBERED.delete(OPEN_PATH);
+      }
+    }
+    return true;
   },
   close_workbook: () => null,
   save_utf8_copy: ({ destination }) => ({
@@ -620,6 +793,7 @@ const HANDLERS = {
       rows,
     };
   },
+  cell_dependencies: ({ sheet, row, col }) => depsOf(sheet, row, col),
   export_ods: () => ({
     path: "C:\\Users\\you\\Documents\\ExcelScry-sample.ods",
     sheets: 4,

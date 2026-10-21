@@ -11,17 +11,22 @@
 </style>
 <figure>
   <img src="formulas.png"
-       alt="ExcelScry showing a sales sheet whose Revenue column carries small corner triangles, with the readout naming G7, its value and the formula =D7*E7">
+       alt="ExcelScry showing a sales sheet whose Revenue column carries small corner triangles, with the readout naming G7, its value and the formula =E7*F7">
   <figcaption>
     The <code>Revenue</code> column is calculated rather than typed, and the
     grid says so: each such cell carries a small triangle in its bottom-right
     corner, and selecting one puts the formula beside the value it produced —
-    <code>G7</code>, <code>$16,431.78</code>, then <code>=D7*E7</code> in a
+    <code>G7</code>, <code>$16,431.78</code>, then <code>=E7*F7</code> in a
     monospaced aside. Hovering the cell shows the same formula, so a total can
     be told from a number somebody typed without leaving the sheet. A formula
     is shown with one leading <code>=</code> whatever syntax the file uses —
-    Excel's <code>D7*E7</code> or an ODS's <code>of:=D7*E7</code> — while what
-    the export writes stays the reader's own text. (Shown in the UI harness,
+    Excel's <code>E7*F7</code> or an ODS's <code>of:=E7*F7</code> — while what
+    the export writes stays the reader's own text. <code>Ctrl+Shift+C</code>
+    copies the formula in that same one-<code>=</code> form, so it can be pasted
+    into a formula bar elsewhere, while <code>Ctrl+C</code> still copies the
+    value. <strong>Trace</strong> beside
+    that formula opens the cells behind it and the cells it feeds
+    ([the chain around G7](dependencies.html)). (Shown in the UI harness,
     whose mock Revenue column carries a formula in the fifth slot beside the
     cell's kind, text, look and hidden value.)
   </figcaption>

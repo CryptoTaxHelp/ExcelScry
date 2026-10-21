@@ -176,6 +176,7 @@ pub fn load_with(path: &Path, dialect: text_table::Dialect) -> Result<LoadedWork
         }
 
         sheets.push(SheetData {
+            original_order: None,
             name: name.clone(),
             rows,
             cols,
@@ -189,6 +190,7 @@ pub fn load_with(path: &Path, dialect: text_table::Dialect) -> Result<LoadedWork
             // Keep the sheets already read, but stop paying for more.
             for remaining in names.iter().skip(sheets.len()) {
                 sheets.push(SheetData {
+                    original_order: None,
                     name: remaining.clone(),
                     rows: Vec::new(),
                     cols: 0,

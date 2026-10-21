@@ -195,6 +195,14 @@ body {
   color: var(--amber);
 }
 
+/* The way back to the file's own order. It sits with the choices that decide
+   what is shown rather than with *Save a copy as UTF-8*, which acts on the
+   file. */
+.textbar-order {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
 .textbar-action {
   margin-left: auto;
   padding: 4px 10px;
@@ -248,6 +256,113 @@ body {
 .btn-lg {
   padding: 9px 20px;
   font-size: 14px;
+}
+
+/* A button that carries a menu under it. The menu is positioned against this
+   wrapper rather than the toolbar, so it opens under the button and scrolls
+   with it. */
+.menu-anchor {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.menu-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* The menu is open: the button says so, since the menu can be dismissed by a
+   click elsewhere and the state has to be read somewhere. */
+.menu-btn[aria-expanded="true"] {
+  background: #22334f;
+  border-color: #3b4d70;
+}
+
+.menu-caret {
+  width: 9px;
+  height: 6px;
+  opacity: 0.7;
+  transition: transform 0.12s ease;
+}
+
+.menu-btn[aria-expanded="true"] .menu-caret {
+  transform: rotate(180deg);
+}
+
+.menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 30;
+  min-width: 352px;
+  padding: 4px;
+  background: var(--chrome-2);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  box-shadow: 0 18px 42px rgba(4, 8, 16, 0.55);
+}
+
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 8px;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  background: none;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.menu-item:hover:not(:disabled),
+.menu-item:focus-visible {
+  background: #1b2942;
+  outline: none;
+}
+
+.menu-item:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* The tick of a checked item, in the column the labels are aligned from. */
+.menu-check {
+  flex: 0 0 14px;
+  height: 14px;
+  color: var(--accent);
+}
+
+.menu-item[aria-checked="true"] .menu-check::before {
+  content: "\2713";
+  display: block;
+  font-size: 13px;
+  line-height: 14px;
+  text-align: center;
+}
+
+.menu-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.menu-note {
+  flex: 0 0 auto;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.menu-rule {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--line);
 }
 
 .btn-icon {
@@ -547,6 +662,39 @@ body {
   top: 0;
   height: 100%;
   border-right: 1px solid #d6dee8;
+}
+
+/* The right edge of a head is the column's edge: dragging it sets the width,
+   so the pointer says so there and a thin bar marks the edge under it. */
+.colhead-grip {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 7px;
+  height: 100%;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.colhead-grip::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  right: 0;
+  bottom: 3px;
+  width: 2px;
+  background: transparent;
+}
+
+.colhead-grip:hover::after,
+body.is-resizing .colhead-grip::after {
+  background: var(--accent);
+}
+
+/* Nothing else on the page follows the pointer while a width is dragged. */
+body.is-resizing {
+  cursor: col-resize;
+  user-select: none;
 }
 
 /* A header row's text is the column's name, so it needs the whole width of the
@@ -1414,4 +1562,186 @@ body {
 .release-notes-body::-webkit-scrollbar-thumb {
   background: #31456a;
   border-radius: 7px;
+}
+
+/* ------------------------------------------------------------ dependencies */
+
+/* The link between the readout's formula and the panel. Only a calculated cell
+   has a chain to follow, so it appears beside the formula and not otherwise. */
+.readout-trace {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 3px 8px;
+  color: var(--accent);
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  background: rgba(56, 189, 248, 0.1);
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.readout-trace:hover {
+  background: rgba(56, 189, 248, 0.2);
+}
+
+.readout-trace:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* The panel floats over the grid rather than beside it: the sheet keeps its
+   width and its scroll, so following a chain never moves the cell in front. */
+.deps {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  width: 304px;
+  max-width: calc(100% - 24px);
+  /* As tall as the chain is, and no taller than the sheet: a cell with two
+     precedents should not leave a column of empty panel beside it. */
+  max-height: calc(100% - 20px);
+  overflow: hidden;
+  background: #0d1728;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 16px 38px rgba(4, 8, 16, 0.5);
+}
+
+.deps-head {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 8px 9px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.deps-heading {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.deps-title {
+  color: var(--accent);
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+.deps-sub {
+  overflow: hidden;
+  color: var(--text-dim);
+  font-family: "Cascadia Mono", Consolas, "Courier New", monospace;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.deps-close {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  font-size: 15px;
+  line-height: 1;
+}
+
+.deps-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 2px 0 10px;
+  overflow-y: auto;
+}
+
+.deps-section h3 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 12px 12px 5px;
+  color: #6f83a1;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.deps-count {
+  padding: 0 5px;
+  color: var(--text-dim);
+  font-size: 10px;
+  letter-spacing: 0;
+  background: rgba(36, 50, 76, 0.7);
+  border-radius: 8px;
+}
+
+.deps-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* One cell of the chain. The reference is fixed width so the texts line up and
+   the chain can be read down the column. */
+.deps-cell {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  padding: 4px 12px;
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+.deps-cell:hover {
+  background: rgba(56, 189, 248, 0.1);
+}
+
+.deps-cell:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.deps-ref {
+  flex: 0 0 46px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.deps-cell.is-calc .deps-ref {
+  color: var(--accent);
+}
+
+.deps-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.deps-empty {
+  margin: 4px 12px 0;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.deps-note {
+  margin: 10px 12px 0;
+  color: var(--text-dim);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.deps-note code {
+  color: var(--accent);
 }
